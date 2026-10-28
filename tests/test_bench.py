@@ -50,7 +50,7 @@ class FakeVLLM(BaseHTTPRequestHandler):
             n = sum(m["role"] == "tool" for m in body["messages"])
             msg = {"content": "", "reasoning_content": "check the database",
                    "tool_calls": [{"id": f"call_{n}", "type": "function",
-                                   "function": {"name": "retrieve", "arguments": json.dumps({"class_name": "late blight", "task": "disease"})}}]}
+                                   "function": {"name": "retrieve", "arguments": json.dumps(ARGS)}}]}
             finish = "tool_calls"
         else:
             msg, finish = {"content": "Late blight", "reasoning_content": "it matches"}, "stop"
@@ -64,6 +64,9 @@ class FakeVLLM(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+
+ARGS = {"description": "dark lesions", "candidates": [{"name": "late blight"}], "task": "disease"}
 
 
 @pytest.fixture
@@ -82,7 +85,7 @@ def _args(data_dir, tmp_path, endpoint, **kw):
     a = dict(data_dir=data_dir, model="google/gemma-4-12B-it", endpoint=endpoint, tools=["retrieve"], max_tool_calls=4,
              task=None, format=["mcqa_within"], only="tomato", limit_per_dataset=None, concurrency=4, thinking=True,
              reasoning_effort="low", max_tokens=None, max_model_len=None, seed=0, out=tmp_path / "runs", run_dir=None,
-             judge=False, judge_endpoint=None)
+             judge=False, judge_endpoint=None, retrieve_cache=None, no_retrieve_cache=False)
     return argparse.Namespace(**{**a, **kw})
 
 
@@ -100,9 +103,9 @@ def test_harness_run_matches_agbench_format_and_logs_traces(data_dir, tmp_path, 
 
     t = traces[0]
     assert t["n_tool_calls"] == 1 and t["tools_used"] == ["retrieve"] and t["turns"] == 2
-    assert t["trace"][0]["tool_calls"] == [{"name": "retrieve", "arguments": {"class_name": "late blight", "task": "disease"}}]
+    assert t["trace"][0]["tool_calls"] == [{"name": "retrieve", "arguments": ARGS}]
     assert t["trace"][1]["role"] == "tool" and "dark lesions" in t["trace"][1]["result"]
-    assert calls[0] == {"class_name": "late blight", "task": "disease"}
+    assert calls[0] == ARGS
     assert all(r["completion_tokens"] == 10 and r["answer"] for r in recs)
 
     # the baseline's sampling and effort settings, plus tools
@@ -114,7 +117,7 @@ def test_harness_run_matches_agbench_format_and_logs_traces(data_dir, tmp_path, 
 
     cfg = json.loads((rd / "run.json").read_text())["method"]
     assert cfg["name"] == "google/gemma-4-12B-it + tools" and cfg["tools"] == ["retrieve"] and cfg["effort"] == "low"
-    assert len(cfg["agbench_commit"]) == 40
+    assert len(cfg["agbench_commit"]) == 40 and cfg["retrieve_cache"] == str(tmp_path / "runs" / "retrieve_cache.jsonl")
 
 
 def test_tool_budget_forces_an_answer(data_dir, tmp_path, fake_server):
@@ -133,15 +136,69 @@ def test_agml_tools_are_not_allowed():
         bench.HarnessMethod("http://127.0.0.1:1", "google/gemma-4-12B-it", tools=["retrieve", "search_agml"])
 
 
-def test_retrieve_result_is_text_only(monkeypatch):
+GBIF = {"gbif": [{"excerpt_text": "Scientific name: Phytophthora infestans", "source_url": "https://gbif.org/species/1",
+                  "raw_response": '{"media": "https://img/1.jpg"}', "extra": {"images": [{"url": "https://img/1.jpg"}]}}]}
+
+
+@pytest.fixture
+def no_cache(monkeypatch):
+    monkeypatch.setattr(bench, "CACHE", None)
+
+
+def test_retrieve_result_is_text_only(monkeypatch, no_cache):
     import agml_agent.retrieve as r
-    monkeypatch.setattr(r, "retrieve", lambda *a, **k: {"gbif": [{
-        "excerpt_text": "Scientific name: Phytophthora infestans", "source_url": "https://gbif.org/species/1",
-        "raw_response": '{"media": "https://img/1.jpg"}', "extra": {"images": [{"url": "https://img/1.jpg"}]}}]})
-    out = bench.run_retrieve("late blight", task="disease")
-    assert out == "[gbif] Scientific name: Phytophthora infestans (source: https://gbif.org/species/1)"
+    monkeypatch.setattr(r, "retrieve", lambda *a, **k: GBIF)
+    out = bench.run_retrieve(candidates=[{"name": "late blight"}], task="disease")
+    assert out == "## late blight\n[gbif] Scientific name: Phytophthora infestans (source: https://gbif.org/species/1)"
     monkeypatch.setattr(r, "retrieve", lambda *a, **k: {})
-    assert bench.run_retrieve("x").startswith("No results found for 'x'.")
+    assert "No results found for 'x'." in bench.run_retrieve(candidates=["x"])
+    assert bench.run_retrieve().startswith("error:")
+
+
+def test_candidates_are_looked_up_by_name(monkeypatch, no_cache):
+    import agml_agent.retrieve as r
+    seen = []
+    text = "Late blight is a disease of potato and tomato. Lesions are dark and water-soaked. Spread by wind."
+    monkeypatch.setattr(r, "retrieve", lambda name, **k: seen.append((name, k)) or {"ucipm_aps": [
+        {"excerpt_text": text, "source_url": f"https://ipm/{name}"}]})
+    out = bench.run_retrieve("dark water-soaked lesions", [{"name": "late blight", "scientific_name": "Phytophthora infestans"},
+                                                         {"name": "early blight", "aliases": ["Alternaria"]}], "tomato", "disease")
+    assert out.index("## late blight") < out.index("## early blight")
+    assert f"[ucipm_aps] {text} (source: https://ipm/late blight)" in out  # short excerpts are kept whole
+    assert ("late blight", {"crop": "tomato", "task": "disease", "scientific_name": "Phytophthora infestans", "aliases": []}) in seen
+    assert ("early blight", {"crop": "tomato", "task": "disease", "scientific_name": None, "aliases": ["Alternaria"]}) in seen
+
+
+def test_description_search(monkeypatch, no_cache):
+    import agml_agent.symptom_search as ss
+    got = []
+    monkeypatch.setattr(ss, "search_description", lambda d, c, t: got.append((d, c, t)) or [
+        {"site": "ipm.ucanr.edu", "title": "Bean Common Mosaic", "url": "https://ipm.ucanr.edu/bcm", "text": "Leaves pucker."}])
+    out = bench.run_retrieve("puckered leaf", crop="bean", task="disease")
+    assert got == [("puckered leaf", "bean", "disease")]
+    assert "[ipm.ucanr.edu] Bean Common Mosaic: Leaves pucker. (source: https://ipm.ucanr.edu/bcm)" in out
+    monkeypatch.setattr(ss, "search_description", lambda *a: [])
+    assert bench.run_retrieve("nothing").startswith("No pages matched")
+
+
+def test_cache_persists_results_but_not_empties(monkeypatch, tmp_path):
+    import agml_agent.retrieve as r
+    n = []
+    monkeypatch.setattr(r, "retrieve", lambda *a, **k: n.append(1) or ({} if len(n) == 1 else GBIF))
+    monkeypatch.setattr(bench, "CACHE", bench.RetrievalCache(tmp_path / "c.jsonl"))
+    for _ in range(3):
+        bench.run_retrieve(candidates=["late blight"])
+    assert len(n) == 2  # empty -> retried; found -> cached
+    monkeypatch.setattr(bench, "CACHE", bench.RetrievalCache(tmp_path / "c.jsonl"))  # a later run
+    assert "Phytophthora" in bench.run_retrieve(candidates=["Late Blight "]) and len(n) == 2
+
+
+def test_focus_keeps_matching_sentences():
+    from agml_agent.symptom_search import focus
+    text = "Rust is common. Pustules are reddish-brown with yellow halos. Manage with fungicides."
+    assert focus(text, "reddish-brown pustules", 60) == "Pustules are reddish-brown with yellow halos."
+    assert focus(text, "reddish-brown pustules", 200) == text  # fits: kept whole
+    assert focus(text, "", 10) == text[:10] and focus(text, "zebra", 10) == text[:10]
 
 
 def test_tool_server_flags():

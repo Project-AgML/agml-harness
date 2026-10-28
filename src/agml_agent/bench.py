@@ -17,7 +17,9 @@ Leakage policy: only tools that query external databases are allowed here
 (BENCH_TOOLS). search_agml is never offered — it returns AgML class lists
 and benchmark results, and agbench items come from AgML. retrieve's result
 is reduced to excerpt text + source URL: no images or image URLs reach the
-model.
+model. Its description search is restricted to UC IPM/APSnet and Bugwood
+fact-sheet sites (symptom_search.py), never the open web, where dataset pages
+could be found.
 
 "Exploit" policy (the first harness baseline): one pass, tools available,
 at most `max_tool_calls` calls, no planning/search/self-consistency. The
@@ -32,7 +34,9 @@ import asyncio
 import importlib.metadata
 import json
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
@@ -43,50 +47,146 @@ from dotenv import load_dotenv
 from agbench.eval import Benchmark, EvalItem, Prediction, VLMMethod
 from agbench.eval.client import encode_image
 
+MAX_CANDIDATES = 4
+
 RETRIEVE_SCHEMA = {
     "type": "function",
     "function": {
         "name": "retrieve",
         "description": (
-            "Look up a named crop disease, pest, weed/plant species or produce-quality class in external agricultural "
-            "databases (EPPO, UC IPM/APS, Bugwood, GBIF, USDA) to check a candidate identification against the image. "
-            "Lookup is by name only: symptom descriptions such as 'yellow spots on leaf' find nothing. If you are unsure, "
-            "call it once per candidate name. Returns short excerpts (taxonomy, hosts, symptoms, identification notes), "
-            "each with its source URL."
+            "Look up crop diseases, pests, weed/plant species and produce-quality classes in external agricultural "
+            "databases (EPPO, UC IPM/APS, Bugwood, GBIF, USDA). Two ways to ask, usable together:\n"
+            "- description: what you see in the image (symptoms, damage, colours, shapes). Searches UC IPM/APS and "
+            "Bugwood fact sheets and returns matching pages; their titles usually name candidate causes.\n"
+            "- candidates: up to 4 names to check. Returns reference text for each (taxonomy, hosts, symptoms, "
+            "identification notes) to compare against the image. With a description too, each excerpt is narrowed to "
+            "the parts matching it.\n"
+            "Names are looked up by name only: put symptoms in description, not in candidate names. Every excerpt "
+            "comes with its source URL."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "class_name": {"type": "string", "description": "Common name of one candidate disease, pest, species or "
-                               "class, e.g. 'coffee leaf rust' or 'silverleaf whitefly'. Not a symptom description."},
+                "description": {"type": "string", "description": "What you see, e.g. 'bean leaf with small "
+                                "reddish-brown pustules surrounded by yellow halos'."},
+                "candidates": {
+                    "type": "array", "maxItems": MAX_CANDIDATES,
+                    "description": "Diseases, pests, species or classes to check, e.g. "
+                                   "[{'name': 'bean rust', 'scientific_name': 'Uromyces appendiculatus'}].",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Common name, e.g. 'coffee leaf rust'."},
+                            "scientific_name": {"type": "string", "description": "Scientific name of the pathogen, "
+                                                "pest or species if known; tried first, usually the most reliable."},
+                            "aliases": {"type": "array", "items": {"type": "string"},
+                                        "description": "Other names, tried if the main names find nothing."},
+                        },
+                        "required": ["name"],
+                    },
+                },
                 "crop": {"type": "string", "description": "Host crop, e.g. 'coffee'."},
                 "task": {"type": "string", "enum": ["disease", "pest", "species", "quality"],
                          "description": "Kind of class; picks which databases are searched."},
-                "scientific_name": {"type": "string", "description": "Scientific name of the pathogen, pest or species if "
-                                    "known, e.g. 'Hemileia vastatrix'. Tried first; usually the most reliable lookup."},
-                "aliases": {"type": "array", "items": {"type": "string"},
-                            "description": "Other names for the same class, tried if the main names find nothing, "
-                                           "e.g. ['angular leaf spot', 'Phaeoisariopsis griseola']."},
             },
-            "required": ["class_name"],
         },
     },
 }
 
 PER_CHUNK_CHARS = 1200
 RESULT_CHARS = 6000
+LIVE_LOOKUPS = 4  # concurrent live lookups across all items: the search backends rate-limit
 
 
-def run_retrieve(class_name: str, crop: str = "", task: str = "", scientific_name: str | None = None,
-                 aliases: list[str] | None = None) -> str:
-    """retrieve(), reduced to what the model may see: excerpt text and source URL per chunk."""
+class RetrievalCache:
+    """Lookup results kept across runs (JSON lines: {key, value}), so a full run doesn't repeat the same slow,
+    rate-limited lookups and every model sees the same retrieved text. Empty results are not stored: they are
+    often transient search failures."""
+
+    def __init__(self, path: str | Path):
+        self.path, self._lock = Path(path), threading.Lock()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.data = {}
+        if self.path.exists():
+            for line in self.path.read_text().splitlines():
+                r = json.loads(line)
+                self.data[r["key"]] = r["value"]
+
+    def get(self, key: str):
+        return self.data.get(key)
+
+    def put(self, key: str, value) -> None:
+        if not value:
+            return
+        with self._lock:
+            self.data[key] = value
+            with open(self.path, "a") as f:
+                f.write(json.dumps({"key": key, "value": value}, ensure_ascii=False) + "\n")
+
+
+CACHE: RetrievalCache | None = None  # set by run()
+_live = threading.Semaphore(LIVE_LOOKUPS)
+
+
+def _cached(key: list, fetch):
+    k = json.dumps(key)
+    if CACHE and (hit := CACHE.get(k)) is not None:
+        return hit
+    with _live:
+        value = fetch()
+    if CACHE:
+        CACHE.put(k, value)
+    return value
+
+
+def _lookup(c: dict, crop: str, task: str) -> dict:
     from agml_agent.retrieve import retrieve
 
-    res = retrieve(class_name, crop=crop, task=task, scientific_name=scientific_name, aliases=aliases)
-    parts = [f"[{src}] {c['excerpt_text'][:PER_CHUNK_CHARS]} (source: {c['source_url']})" for src, chunks in res.items() for c in chunks]
-    return "\n\n".join(parts)[:RESULT_CHARS] or (
-        f"No results found for {class_name!r}. Lookup is by name only: retry with a specific candidate disease, pest "
-        "or species name, its scientific name, or aliases, or answer from the image.")
+    name, sci, aliases = c["name"], c.get("scientific_name") or None, c.get("aliases") or []
+    return _cached(["name", name.strip().lower(), sci, aliases, crop.lower(), task],
+                   lambda: retrieve(name, crop=crop, task=task, scientific_name=sci, aliases=aliases))
+
+
+def _join(parts: list[str], limit: int) -> str:
+    """Whole parts while they fit (a cut part would lose its source URL); the first one is cut if it alone is too long."""
+    out, size = [], 0
+    for part in parts:
+        if size + len(part) > limit:
+            if not out:
+                out.append(part[:limit])
+            break
+        out.append(part)
+        size += len(part) + 2
+    return "\n\n".join(out)
+
+
+def run_retrieve(description: str = "", candidates: list | None = None, crop: str = "", task: str = "") -> str:
+    """The retrieve tool, reduced to what the model may see: excerpt text and source URL per chunk."""
+    from agml_agent.symptom_search import focus, search_description
+
+    cands = [{"name": c} if isinstance(c, str) else c for c in candidates or []]
+    cands = [c for c in cands if isinstance(c, dict) and c.get("name")][:MAX_CANDIDATES]
+    if not description and not cands:
+        return "error: give a description of what you see and/or candidates (names) to check."
+    if cands:
+        with ThreadPoolExecutor(len(cands)) as ex:
+            found = list(ex.map(lambda c: _lookup(c, crop, task), cands))
+        sections = []
+        for c, res in zip(cands, found):
+            chunks = [f"[{src}] {focus(ch['excerpt_text'], description, PER_CHUNK_CHARS)} (source: {ch['source_url']})"
+                      for src, chs in res.items() for ch in chs]
+            body = _join(chunks, RESULT_CHARS // len(cands)) or (
+                f"No results found for {c['name']!r}. Try its scientific name or aliases, or another candidate.")
+            sections.append(f"## {c['name']}\n{body}")
+        return "\n\n".join(sections)
+    pages = _cached(["description", description.strip().lower(), crop.lower(), task],
+                    lambda: search_description(description, crop, task))
+    if not pages:
+        return ("No pages matched this description. Try fewer, more specific symptom words, or give candidate names "
+                "to check, or answer from the image.")
+    return ("Pages matching the description (titles usually name the cause; check likely ones with candidates):\n\n"
+            + _join([f"[{p['site']}] {p['title']}: {focus(p['text'], description, PER_CHUNK_CHARS)} (source: {p['url']})"
+                     for p in pages], RESULT_CHARS))
 
 
 # name -> (schema, function). Only external-database tools: see the leakage policy above.
@@ -140,7 +240,8 @@ class HarnessMethod(VLMMethod):
     def config(self) -> dict:
         return {**super().config(), "name": self.name, "harness": "exploit", "tools": self.tools,
                 "max_tool_calls": self.max_tool_calls, "agml_agent": importlib.metadata.version("agml-agent"),
-                "agml_agent_git": _git_sha(Path(__file__).parent), "agbench_commit": _agbench_commit()}
+                "agml_agent_git": _git_sha(Path(__file__).parent), "agbench_commit": _agbench_commit(),
+                "retrieve_cache": str(CACHE.path) if CACHE else None}
 
     async def _create(self, **kw):
         err = None
@@ -262,7 +363,9 @@ def run(args: argparse.Namespace) -> Path:
     from agbench.eval.runner import log_compute
     from agbench.eval.servers import Server
 
+    global CACHE
     load_dotenv()
+    CACHE = None if args.no_retrieve_cache else RetrievalCache(args.retrieve_cache or args.out / "retrieve_cache.jsonl")
     bench = Benchmark(args.data_dir, args.task or None, args.format or None, args.only, args.limit_per_dataset, args.seed)
     print(f"{len(bench.items)} items; {len(bench.skipped)} datasets skipped")
     spec = model_spec(args.model)
@@ -310,6 +413,8 @@ def main() -> None:
     p.add_argument("--run-dir", type=Path, help="Resume into this run dir.")
     p.add_argument("--judge", action="store_true", help="Judge open-ended answers after the run (agbench judge).")
     p.add_argument("--judge-endpoint")
+    p.add_argument("--retrieve-cache", type=Path, help="Lookup cache shared across runs (default: <out>/retrieve_cache.jsonl).")
+    p.add_argument("--no-retrieve-cache", action="store_true", help="Always look up live.")
     run(p.parse_args())
 
 

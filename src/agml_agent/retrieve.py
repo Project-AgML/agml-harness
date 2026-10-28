@@ -122,8 +122,8 @@ def retrieve(
             continue
 
         chunk_dicts = [c.to_dict() for c in chunks]
-        _CACHE[cache_key] = chunk_dicts
-        if chunk_dicts:
+        if chunk_dicts:  # empties aren't cached: search backends fail transiently, so a later call may find it
+            _CACHE[cache_key] = chunk_dicts
             results[name] = chunk_dicts
 
     return results

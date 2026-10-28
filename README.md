@@ -116,6 +116,12 @@ uv run agml-agent-bench ... --run-dir runs/<run>                                
 - **Leakage:** only external-database tools are allowed (`retrieve`); `search_agml` is refused because AgML class
   lists and benchmark results would leak labels. `retrieve` results reach the model as excerpt text and source
   URLs only, never images.
+- **The `retrieve` tool** takes a `description` of what the model sees and/or up to 4 `candidates` (name,
+  scientific name, aliases), plus `crop` and `task`. A description searches UC IPM and Bugwood fact sheets
+  (site-restricted, never the open web) and returns pages whose titles name candidate causes; candidates are looked
+  up by name in every database (EPPO, UC IPM/APS, Bugwood, GBIF, USDA), with long excerpts narrowed to the
+  sentences matching the description. Lookups are cached in `<out>/retrieve_cache.jsonl` across runs
+  (`--retrieve-cache`, `--no-retrieve-cache`), so repeated classes are fast and every model sees the same text.
 - **Budget:** `max_tokens` (agbench's) caps completion tokens summed over all turns; tool results count only
   toward the context window.
 - **Output:** a standard agbench run dir plus `traces.jsonl` (every model turn, tool call, arguments, result and

@@ -18,6 +18,7 @@ from agml_agent.common.http import HEADERS, TIMEOUT
 log = logging.getLogger(__name__)
 
 FETCH_SLEEP = 1.0
+BACKENDS = ["auto", "yahoo", "google", "brave"]  # ddgs 9.x engines; "auto" picks among them itself
 
 
 def fetch_and_extract(url: str) -> str | None:
@@ -58,28 +59,33 @@ def search_and_extract(
     keep: int = 2,
     avoid_url_substrings: list[str] | None = None,
 ) -> list[dict]:
-    """Returns up to `keep` dicts: {title, url, text, matched_term}.
+    """Returns up to `keep` dicts: {title, url, text, matched_term}. Empty
+    `match_terms` keeps every extracted page (matched_term "") — for free-text
+    searches with no class name to require.
 
     avoid_url_substrings deprioritizes matching hits (e.g. "/pdf/" links that
     trafilatura can't extract text from) rather than dropping them outright —
     they're tried last, so a source whose only hits are PDFs still gets
     something instead of nothing."""
-    site_filter = " OR ".join(f"site:{s}" for s in sites)
-    full_query = f"({site_filter}) {query}"
-
+    # Search engines differ in which site-restricted queries they answer, and long multi-site queries often get
+    # nothing anywhere: try the combined query, then one site at a time, each across several engines.
+    queries = [f"({' OR '.join(f'site:{s}' for s in sites)}) {query}"] if len(sites) > 1 else []
+    queries += [f"site:{s} {query}" for s in sites]
     hits: list[dict] = []
-    for attempt, delay in enumerate([0, 4, 10]):
-        if delay:
-            time.sleep(delay)
-        try:
-            hits = list(DDGS().text(full_query, max_results=max_results))
+    for q in queries:
+        for backend in BACKENDS:
+            try:
+                hits = list(DDGS().text(q, max_results=max_results, backend=backend))
+            except Exception as e:
+                log.debug("search failed for %r on %s: %s", q, backend, e)
             if hits:
                 break
-        except Exception as e:
-            log.debug("search attempt %d failed for %r: %s", attempt + 1, full_query, e)
+            time.sleep(1)
+        if hits:
+            break
     if not hits:
-        log.warning("no search results for %r after retries — DDGS backends can be flaky/"
-                     "rate-limited at scale, retry this class individually if it matters", full_query)
+        log.warning("no search results for %r on any site/engine — DDGS backends can be flaky/rate-limited at scale, "
+                    "retry this class individually if it matters", query)
         return []
 
     avoid = avoid_url_substrings or []
@@ -97,7 +103,7 @@ def search_and_extract(
             text = fetch_and_extract(url)
             if not text:
                 continue
-            matched = find_match(text, match_terms)
+            matched = find_match(text, match_terms) if match_terms else ""
             if matched is None:
                 continue
             found.append({
