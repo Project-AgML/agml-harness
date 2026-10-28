@@ -127,12 +127,28 @@ uv run agml-agent-bench ... --run-dir runs/<run>                                
 - **Output:** a standard agbench run dir plus `traces.jsonl` (every model turn, tool call, arguments, result and
   latency per item).
 
-Compare scores in agbench's viewer, and tool use and traces in the harness viewer:
+### Viewing results
+
+Scores, next to the plain-model baselines, in agbench's viewer:
 
 ```bash
 uv run agbench eval view --runs <baseline run> runs/<harness run> --data-dir /path
+```
+
+Tool use and traces in the harness viewer (`agml-agent-view`, Streamlit, http://localhost:8503):
+
+```bash
 uv run agml-agent-view --runs runs/<harness run> --baseline <baseline run> --data-dir /path
 ```
+
+- **Tool use:** how often each tool was called, overall and per task; per baseline, which items the tools fixed and
+  which they broke.
+- **Traces:** per item, the image, prompt, ground truth, the harness and baseline answers with scores, and every model
+  turn: reasoning, each tool call with its arguments, and the tool result with its latency. Filter by run, dataset,
+  format, tool use and fixed/broken.
+
+`--runs` takes run dirs or folders of them (several harness runs can be compared); `--data-dir` is only needed when
+images live elsewhere than when the runs were made.
 
 ## Updating / removing
 
