@@ -120,7 +120,8 @@ uv run agml-agent-bench ... --run-dir runs/<run>                                
   scientific name, aliases), plus `crop` and `task`. A description searches UC IPM and Bugwood fact sheets
   (site-restricted, never the open web) and returns pages whose titles name candidate causes; candidates are looked
   up by name in every database (EPPO, UC IPM/APS, Bugwood, GBIF, USDA), with long excerpts narrowed to the
-  sentences matching the description. Lookups are cached in `<out>/retrieve_cache.jsonl` across runs
+  sentences matching the description. `--retrieve-mode candidates` offers name checks only (no description
+  search), to compare the two. Lookups are cached in `<out>/retrieve_cache.jsonl` across runs
   (`--retrieve-cache`, `--no-retrieve-cache`), so repeated classes are fast and every model sees the same text.
 - **Budget:** `max_tokens` (agbench's) caps completion tokens summed over all turns; tool results count only
   toward the context window.

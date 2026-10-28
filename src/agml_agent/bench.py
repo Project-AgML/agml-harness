@@ -94,6 +94,28 @@ RETRIEVE_SCHEMA = {
     },
 }
 
+# --retrieve-mode candidates: the model proposes names and the tool checks them; no search by description. To compare
+# with the default (pilots 2-3: description search anchored the model on whatever pages it returned).
+CANDIDATES_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "retrieve",
+        "description": (
+            "Look up crop diseases, pests, weed/plant species and produce-quality classes by name in external "
+            "agricultural databases (EPPO, UC IPM/APS, Bugwood, GBIF, USDA). Give up to 4 candidate names, e.g. the "
+            "causes you are considering; returns reference text for each (taxonomy, hosts, symptoms, identification "
+            "notes) to compare against the image. Lookup is by name only: symptom descriptions find nothing. Every "
+            "excerpt comes with its source URL."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {k: v for k, v in RETRIEVE_SCHEMA["function"]["parameters"]["properties"].items() if k != "description"},
+            "required": ["candidates"],
+        },
+    },
+}
+RETRIEVE_MODES = {"description+candidates": RETRIEVE_SCHEMA, "candidates": CANDIDATES_SCHEMA}
+
 PER_CHUNK_CHARS = 1200
 # After a description search. Pilot 2: the model answered with the first page's cause and never checked it, and a
 # search always returns pages, even for a healthy plant.
@@ -234,19 +256,23 @@ class HarnessMethod(VLMMethod):
 
     def __init__(self, endpoint: str, model_id: str, thinking: bool = True, effort: str | None = "low",
                  max_tokens: int | None = None, tools: list[str] | tuple[str, ...] = ("retrieve",), max_tool_calls: int = 4,
-                 trace_path: str | Path | None = None, served_name: str | None = None, retries: int = 3):
+                 trace_path: str | Path | None = None, served_name: str | None = None, retries: int = 3,
+                 retrieve_mode: str = "description+candidates"):
         super().__init__(endpoint, model_id, thinking, effort, max_tokens, served_name=served_name)
         if bad := [t for t in tools if t not in BENCH_TOOLS]:
             raise ValueError(f"tools {bad} not allowed in benchmark runs; allowed: {sorted(BENCH_TOOLS)} "
                              "(search_agml is excluded: AgML class lists/results leak benchmark labels)")
         self.tools, self.max_tool_calls, self.retries = list(tools), max_tool_calls, retries
         self.trace_path = Path(trace_path) if trace_path else None
-        self.name = f"{model_id} + tools"
+        if retrieve_mode not in RETRIEVE_MODES:
+            raise ValueError(f"retrieve_mode {retrieve_mode!r}; one of {sorted(RETRIEVE_MODES)}")
+        self.retrieve_mode = retrieve_mode
+        self.name = f"{model_id} + tools" + ("" if retrieve_mode == "description+candidates" else f" ({retrieve_mode})")
         self._lock = asyncio.Lock()
 
     def config(self) -> dict:
         return {**super().config(), "name": self.name, "harness": "exploit", "tools": self.tools,
-                "max_tool_calls": self.max_tool_calls, "agml_agent": importlib.metadata.version("agml-agent"),
+                "max_tool_calls": self.max_tool_calls, "retrieve_mode": self.retrieve_mode, "agml_agent": importlib.metadata.version("agml-agent"),
                 "agml_agent_git": _git_sha(Path(__file__).parent), "agbench_commit": _agbench_commit(),
                 "retrieve_cache": str(CACHE.path) if CACHE else None}
 
@@ -265,6 +291,8 @@ class HarnessMethod(VLMMethod):
         t0 = time.perf_counter()
         try:
             args = json.loads(raw_args or "{}")
+            if name == "retrieve" and self.retrieve_mode == "candidates":
+                args.pop("description", None)  # not offered in this mode
             result = await asyncio.to_thread(BENCH_TOOLS[name][1], **args) if name in self.tools else f"error: unknown tool {name!r}"
         except Exception as e:  # bad JSON or arguments, source failures
             result = f"error: {type(e).__name__}: {e}"
@@ -278,7 +306,7 @@ class HarnessMethod(VLMMethod):
         messages = ([{"role": "system", "content": self.system}] if self.system else []) + [{"role": "user", "content": content}]
         body = dict(self.body)
         temperature = body.pop("temperature", None)
-        schemas = [BENCH_TOOLS[t][0] for t in self.tools]
+        schemas = [RETRIEVE_MODES[self.retrieve_mode] if t == "retrieve" else BENCH_TOOLS[t][0] for t in self.tools]
 
         trace, n_calls, tool_s, used = [], 0, 0.0, []
         prompt_tokens = completion_tokens = 0
@@ -377,12 +405,13 @@ def run(args: argparse.Namespace) -> Path:
     print(f"{len(bench.items)} items; {len(bench.skipped)} datasets skipped")
     spec = model_spec(args.model)
     conc = args.concurrency or (spec.get("parallel", 2) if spec["backend"] == "llamacpp" else spec["concurrency"])
-    rd = args.run_dir or args.out / f"{args.model.replace('/', '__')}__tools_{datetime.now():%Y%m%d-%H%M%S}"
+    tag = "tools" if args.retrieve_mode == "description+candidates" else f"tools-{args.retrieve_mode}"
+    rd = args.run_dir or args.out / f"{args.model.replace('/', '__')}__{tag}_{datetime.now():%Y%m%d-%H%M%S}"
     rd.mkdir(parents=True, exist_ok=True)
 
     def method(endpoint: str) -> HarnessMethod:
         return HarnessMethod(endpoint, args.model, args.thinking, args.reasoning_effort, args.max_tokens, args.tools,
-                             args.max_tool_calls, trace_path=rd / "traces.jsonl")
+                             args.max_tool_calls, trace_path=rd / "traces.jsonl", retrieve_mode=args.retrieve_mode)
 
     if args.endpoint:
         res = bench.run(method(args.endpoint), rd, conc, key_formats=key_formats(spec))
@@ -406,6 +435,8 @@ def main() -> None:
     p.add_argument("--endpoint", help="Use a running OpenAI-compatible server (started with tool calling on) instead of launching one.")
     p.add_argument("--tools", nargs="+", default=["retrieve"], help=f"Tools offered to the model; allowed: {sorted(BENCH_TOOLS)}.")
     p.add_argument("--max-tool-calls", type=int, default=4)
+    p.add_argument("--retrieve-mode", choices=sorted(RETRIEVE_MODES), default="description+candidates",
+                   help="description+candidates: search by what the model sees and check names; candidates: check names only.")
     p.add_argument("--task", action="append", help="classification | detection | segmentation | image_text_to_text (repeatable).")
     p.add_argument("--format", action="append", help="mcqa_within | mcqa_across | oeq | grounding | native (repeatable).")
     p.add_argument("--only", help="Regex on dataset name.")

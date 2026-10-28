@@ -85,7 +85,8 @@ def _args(data_dir, tmp_path, endpoint, **kw):
     a = dict(data_dir=data_dir, model="google/gemma-4-12B-it", endpoint=endpoint, tools=["retrieve"], max_tool_calls=4,
              task=None, format=["mcqa_within"], only="tomato", limit_per_dataset=None, concurrency=4, thinking=True,
              reasoning_effort="low", max_tokens=None, max_model_len=None, seed=0, out=tmp_path / "runs", run_dir=None,
-             judge=False, judge_endpoint=None, retrieve_cache=None, no_retrieve_cache=False)
+             judge=False, judge_endpoint=None, retrieve_cache=None, no_retrieve_cache=False,
+             retrieve_mode="description+candidates")
     return argparse.Namespace(**{**a, **kw})
 
 
@@ -129,6 +130,17 @@ def test_tool_budget_forces_an_answer(data_dir, tmp_path, fake_server):
     assert [b["tool_choice"] for b in FakeVLLM.requests[:3]] == ["auto", "auto", "none"]
     rec = json.loads((rd / "predictions.jsonl").read_text().splitlines()[0])
     assert rec["answer"] == "Late blight" and not rec["error"]
+
+
+def test_candidates_mode_offers_no_description_search(data_dir, tmp_path, fake_server):
+    endpoint, calls = fake_server
+    rd = bench.run(_args(data_dir, tmp_path, endpoint, retrieve_mode="candidates", limit_per_dataset=1))
+    assert rd.name.startswith("google__gemma-4-12B-it__tools-candidates_")
+    params = FakeVLLM.requests[0]["tools"][0]["function"]["parameters"]
+    assert "description" not in params["properties"] and params["required"] == ["candidates"]
+    assert calls[0] == {"candidates": [{"name": "late blight"}], "task": "disease"}  # description dropped
+    cfg = json.loads((rd / "run.json").read_text())["method"]
+    assert cfg["retrieve_mode"] == "candidates" and cfg["name"] == "google/gemma-4-12B-it + tools (candidates)"
 
 
 def test_agml_tools_are_not_allowed():
