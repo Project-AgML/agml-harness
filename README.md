@@ -96,6 +96,38 @@ Returns `{"results": [...], "total_matched": N}`. Keyword search returns trimmed
 `ml_task`: `image_classification` \| `object_detection` \| `semantic_segmentation`.
 `ag_task`: e.g. `disease_classification`, `weed_detection`, `quality_classification`.
 
+## Benchmarking (AGgentic-benchmarks)
+
+The harness is scored with agbench, unchanged: items, prompts, sampling and effort settings, grading and the judge
+all come from the pinned agbench commit (`[tool.uv.sources]` in `pyproject.toml`), so a harness run is directly
+comparable with the plain-model baselines. agbench is a private repo, so it is an optional extra that needs GitHub
+SSH access:
+
+```bash
+uv sync --extra bench
+uv run agml-agent-bench --model google/gemma-4-12B-it --data-dir /path/with/base-data --judge
+uv run agml-agent-bench ... --only '^(bean_disease_uganda|AgriBench)$' --limit-per-dataset 2   # pilot
+uv run agml-agent-bench ... --run-dir runs/<run>                                                # resume
+```
+
+- **Policy ("exploit"):** one pass with tools available, at most `--max-tool-calls` calls (default 4), agbench's
+  prompt unchanged. The model's server is started with tool calling on (`config/tool_parsers.yaml`), or pass
+  `--endpoint` for one already running with tools on.
+- **Leakage:** only external-database tools are allowed (`retrieve`); `search_agml` is refused because AgML class
+  lists and benchmark results would leak labels. `retrieve` results reach the model as excerpt text and source
+  URLs only, never images.
+- **Budget:** `max_tokens` (agbench's) caps completion tokens summed over all turns; tool results count only
+  toward the context window.
+- **Output:** a standard agbench run dir plus `traces.jsonl` (every model turn, tool call, arguments, result and
+  latency per item).
+
+Compare scores in agbench's viewer, and tool use and traces in the harness viewer:
+
+```bash
+uv run agbench eval view --runs <baseline run> runs/<harness run> --data-dir /path
+uv run agml-agent-view --runs runs/<harness run> --baseline <baseline run> --data-dir /path
+```
+
 ## Updating / removing
 
 `uvx --from git+...` resolves the latest commit on the default branch on every launch — each new session picks up the newest version automatically, no reinstall needed. To pin a stable version instead, append `@<tag>` to the URL, e.g. `git+https://github.com/Project-AgML/agml-agent@v0.1.0`.
@@ -126,6 +158,7 @@ git clone https://github.com/Project-AgML/agml-agent
 cd agml-agent
 uv sync
 uv run agml-agent-mcp
+uv sync --extra bench && uv run pytest   # tests (benchmark code needs the bench extra)
 ```
 
 ## License
