@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Agentic toolkit for AgML: live external grounding (retrieve) + AgML catalog search (search_agml), exposed via MCP"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 authors = [
     { name = "Project-AgML" },
 ]
@@ -18,6 +18,7 @@ dependencies = [
     "agml>=0.8.1",
     "mcp>=2.2.0",
     "ollama>=0.6.2",
+    "agbench",
 ]
 
 [project.scripts]
@@ -25,6 +26,11 @@ agml-agent-mcp = "agml_agent.mcp_server:main"
 agml-agent-retrieve = "agml_agent.retrieve:main"
 agml-agent-search = "agml_agent.search_agml:main"
 agml-agent-chat = "agml_agent.chat:main"
+
+[tool.uv.sources]
+# Development: sibling checkout. For release, swap to
+# agbench = { git = "ssh://git@github.com/plant-ai-biophysics-lab/AGgentic-benchmarks" }
+agbench = { path = "../AGgentic-benchmarks", editable = true }
 
 [build-system]
 requires = ["hatchling"]

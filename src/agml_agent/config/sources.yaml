@@ -22,11 +22,8 @@ sources:
     module: agml_agent.sources.eppo
     task: [disease, pest]
     access: keyed_api
-    verified: false   # EPPO's REST host (data.eppo.int) timed out from the
-                       # dev sandbox this was built in — endpoints are per
-                       # EPPO's own published REST docs, confirm with a real
-                       # EPPO_API_KEY on a network that isn't blocking it.
-    license: "EPPO Open Data Licence"
+    verified: true    # REST v2 (api.eppo.int/gd/v2); the v1 API is retired (403)
+    license: "EPPO Global Database — attribute source_url"
     status: active
 
   - name: ucipm_aps

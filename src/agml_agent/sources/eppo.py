@@ -1,15 +1,13 @@
-"""EPPO Data Portal REST API — free account + API key, EPPO Open Data
-Licence. Per EPPO's own published REST docs:
-    GET https://data.eppo.int/api/rest/1.0/tools/search?kw=<term>&authtoken=<key>
-    GET https://data.eppo.int/api/rest/1.0/taxon/<eppocode>?authtoken=<key>
-    GET https://data.eppo.int/api/rest/1.0/taxon/<eppocode>/categorization?authtoken=<key>
-    GET https://data.eppo.int/api/rest/1.0/taxon/<eppocode>/hosts?authtoken=<key>
-    GET https://data.eppo.int/api/rest/1.0/taxon/<eppocode>/distribution?authtoken=<key>
+"""EPPO Global Database REST v2 — free account + API key, sent as an
+X-Api-Key header:
+    GET https://api.eppo.int/gd/v2/tools/name2codes?name=<term>
+    GET https://api.eppo.int/gd/v2/taxons/taxon/<eppocode>/{overview,names,kingdom,hosts,photos}
 
-data.eppo.int timed out from the dev sandbox this was built in (DNS resolved,
-TCP connect hung) — could not be hit live while writing this file. Confirm
-with a real EPPO_API_KEY on a network that isn't blocking it. Only this
-source needs a key — see README "API keys".
+Replaces the retired v1 API (data.eppo.int/api/rest/1.0, now 403). Ported
+from AGgentic-context's agalign/eppo.py. Returns one names/taxonomy/hosts
+chunk and, when EPPO has symptom/diagnostic photos, one chunk of their
+captions (short visual descriptions). Only this source needs a key — see
+README "API keys".
 """
 
 from __future__ import annotations
@@ -22,75 +20,70 @@ from agml_agent.common.schema import RetrievedChunk
 from agml_agent.common.tagging import normalize_tags
 from agml_agent.sources.base import ClassQuery
 
-BASE = "https://data.eppo.int/api/rest/1.0"
-LICENSE = "EPPO Open Data Licence"
+BASE = "https://api.eppo.int/gd/v2"
+LICENSE = "EPPO Global Database — attribute source_url"
+
+
+def _get(path: str, key: str, **params):
+    r = get(BASE + path, params=params or None, headers={"X-Api-Key": key})
+    return r.json() if r is not None and r.status_code == 200 else None
+
+
+def _code(terms: list[str], key: str) -> str | None:
+    for t in terms:
+        hits = _get("/tools/name2codes", key, name=t)
+        if hits:
+            return next((h["eppocode"] for h in hits if h.get("preferred")), hits[0]["eppocode"])
+    return None
 
 
 def fetch(query: ClassQuery) -> list[RetrievedChunk]:
-    api_key = os.environ.get("EPPO_API_KEY")
-    if not api_key:
+    key = os.environ.get("EPPO_API_KEY")
+    if not key:
         raise RuntimeError(
             "EPPO_API_KEY not set. Register free at https://data.eppo.int/ui/#/user/register, "
             "log in, and your account page has your API token — put it in .env. See README 'API keys'."
         )
 
-    eppocode = None
-    for term in query.search_terms():
-        resp = get(f"{BASE}/tools/search", params={"kw": term, "authtoken": api_key})
-        if resp is None or resp.status_code != 200:
-            continue
-        hits = resp.json()
-        if hits:
-            eppocode = hits[0].get("eppocode")
-            break
-    if not eppocode:
+    # Scientific name first: EPPO is keyed on taxa.
+    terms = query.search_terms()
+    if query.scientific_name:
+        terms = [query.scientific_name] + [t for t in terms if t != query.scientific_name]
+    code = _code(terms, key)
+    if not code:
         return []
 
-    def _get(path: str):
-        r = get(f"{BASE}/taxon/{eppocode}{path}", params={"authtoken": api_key})
-        return r.json() if r is not None and r.status_code == 200 else None
+    overview = _get(f"/taxons/taxon/{code}/overview", key) or {}
+    names = _get(f"/taxons/taxon/{code}/names", key) or []
+    kingdom = ((_get(f"/taxons/taxon/{code}/kingdom", key) or {}).get("eppocode") or {}).get("prefname")
+    hosts = _get(f"/taxons/taxon/{code}/hosts", key) or []
+    photos = _get(f"/taxons/taxon/{code}/photos", key) or []
 
-    taxon = _get("")
-    categorization = _get("/categorization") or []
-    hosts = _get("/hosts") or []
-    distribution = _get("/distribution") or []
+    def chunk(text: str, tags: list[str], raw) -> RetrievedChunk:
+        return RetrievedChunk(
+            class_name=query.class_name,
+            tags=normalize_tags(tags),
+            excerpt_text=text,
+            raw_response=RetrievedChunk.raw_json(raw),
+            source_url=f"https://gd.eppo.int/taxon/{code}",
+            license=LICENSE,
+            accessed_date=str(date.today()),
+            crop=query.crop,
+            query_task=query.task,
+            extra={"eppocode": code},
+        )
 
-    raw = {"taxon": taxon, "categorization": categorization, "hosts": hosts, "distribution": distribution}
+    common = sorted({n["fullname"] for n in names if n.get("lang_iso") == "en"})
+    major = [h["prefname"] for h in hosts if h.get("class_label") == "Major host"]
+    parts = [f"Preferred name: {overview.get('prefname', code)} (EPPO code {code})",
+             f"Kingdom: {kingdom}" if kingdom else "",
+             f"English common names: {'; '.join(common)}" if common else "",
+             f"Major hosts: {', '.join(major[:20])}" if major else ""]
+    out = [chunk(". ".join(p for p in parts if p), ["taxonomy"] + (["host"] if major else []),
+                 {"overview": overview, "names": names, "kingdom": kingdom, "hosts": hosts})]
 
-    excerpt_parts = []
-    if taxon:
-        excerpt_parts.append(f"Preferred name: {taxon.get('prefname', query.class_name)}")
-        if taxon.get("taxonomy"):
-            excerpt_parts.append(f"Taxonomy: {taxon['taxonomy']}")
-    if categorization:
-        cats = ", ".join(c.get("name", "") for c in categorization if c.get("name"))
-        if cats:
-            excerpt_parts.append(f"Regulatory categorization: {cats}")
-    if hosts:
-        host_names = ", ".join(h.get("name", "") for h in hosts[:15] if h.get("name"))
-        if host_names:
-            excerpt_parts.append(f"Hosts: {host_names}")
-    if distribution:
-        regions = ", ".join(d.get("country", d.get("name", "")) for d in distribution[:15])
-        if regions:
-            excerpt_parts.append(f"Distribution: {regions}")
-
-    tags = normalize_tags(
-        ["taxonomy"]
-        + (["category", "distribution"] if categorization else [])
-        + (["host"] if hosts else [])
-        + (["distribution"] if distribution else [])
-    )
-
-    return [RetrievedChunk(
-        class_name=query.class_name,
-        tags=tags,
-        excerpt_text="\n".join(excerpt_parts) or query.class_name,
-        raw_response=RetrievedChunk.raw_json(raw),
-        source_url=f"https://gd.eppo.int/taxon/{eppocode}",
-        license=LICENSE,
-        accessed_date=str(date.today()),
-        crop=query.crop,
-        query_task=query.task,
-        extra={"eppocode": eppocode},
-    )]
+    symptom_photos = [p for p in photos if {"Symptoms", "Diagnostic"} & set(p.get("tags") or [])]
+    captions = [c for c in dict.fromkeys(" ".join((p.get("descinfo") or "").split()) for p in symptom_photos) if c]
+    if captions:
+        out.append(chunk("Symptoms shown in EPPO photos: " + " | ".join(captions), ["symptom"], symptom_photos))
+    return out
