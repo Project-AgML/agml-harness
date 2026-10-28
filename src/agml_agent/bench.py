@@ -48,18 +48,25 @@ RETRIEVE_SCHEMA = {
     "function": {
         "name": "retrieve",
         "description": (
-            "Look up reference text about a crop disease, pest, weed/plant species or produce-quality class in external "
-            "agricultural databases (EPPO, UC IPM/APS, Bugwood, GBIF, USDA). Returns short excerpts such as taxonomy, "
-            "hosts, symptoms and identification notes, each with its source URL."
+            "Look up a named crop disease, pest, weed/plant species or produce-quality class in external agricultural "
+            "databases (EPPO, UC IPM/APS, Bugwood, GBIF, USDA) to check a candidate identification against the image. "
+            "Lookup is by name only: symptom descriptions such as 'yellow spots on leaf' find nothing. If you are unsure, "
+            "call it once per candidate name. Returns short excerpts (taxonomy, hosts, symptoms, identification notes), "
+            "each with its source URL."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "class_name": {"type": "string", "description": "Common name of the disease, pest, species or class, e.g. 'coffee leaf rust'."},
+                "class_name": {"type": "string", "description": "Common name of one candidate disease, pest, species or "
+                               "class, e.g. 'coffee leaf rust' or 'silverleaf whitefly'. Not a symptom description."},
                 "crop": {"type": "string", "description": "Host crop, e.g. 'coffee'."},
                 "task": {"type": "string", "enum": ["disease", "pest", "species", "quality"],
                          "description": "Kind of class; picks which databases are searched."},
-                "scientific_name": {"type": "string", "description": "Scientific name if known, e.g. 'Hemileia vastatrix'."},
+                "scientific_name": {"type": "string", "description": "Scientific name of the pathogen, pest or species if "
+                                    "known, e.g. 'Hemileia vastatrix'. Tried first; usually the most reliable lookup."},
+                "aliases": {"type": "array", "items": {"type": "string"},
+                            "description": "Other names for the same class, tried if the main names find nothing, "
+                                           "e.g. ['angular leaf spot', 'Phaeoisariopsis griseola']."},
             },
             "required": ["class_name"],
         },
@@ -70,13 +77,16 @@ PER_CHUNK_CHARS = 1200
 RESULT_CHARS = 6000
 
 
-def run_retrieve(class_name: str, crop: str = "", task: str = "", scientific_name: str | None = None) -> str:
+def run_retrieve(class_name: str, crop: str = "", task: str = "", scientific_name: str | None = None,
+                 aliases: list[str] | None = None) -> str:
     """retrieve(), reduced to what the model may see: excerpt text and source URL per chunk."""
     from agml_agent.retrieve import retrieve
 
-    res = retrieve(class_name, crop=crop, task=task, scientific_name=scientific_name)
+    res = retrieve(class_name, crop=crop, task=task, scientific_name=scientific_name, aliases=aliases)
     parts = [f"[{src}] {c['excerpt_text'][:PER_CHUNK_CHARS]} (source: {c['source_url']})" for src, chunks in res.items() for c in chunks]
-    return "\n\n".join(parts)[:RESULT_CHARS] or "No results found."
+    return "\n\n".join(parts)[:RESULT_CHARS] or (
+        f"No results found for {class_name!r}. Lookup is by name only: retry with a specific candidate disease, pest "
+        "or species name, its scientific name, or aliases, or answer from the image.")
 
 
 # name -> (schema, function). Only external-database tools: see the leakage policy above.

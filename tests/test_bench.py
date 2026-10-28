@@ -141,7 +141,7 @@ def test_retrieve_result_is_text_only(monkeypatch):
     out = bench.run_retrieve("late blight", task="disease")
     assert out == "[gbif] Scientific name: Phytophthora infestans (source: https://gbif.org/species/1)"
     monkeypatch.setattr(r, "retrieve", lambda *a, **k: {})
-    assert bench.run_retrieve("x") == "No results found."
+    assert bench.run_retrieve("x").startswith("No results found for 'x'.")
 
 
 def test_tool_server_flags():
