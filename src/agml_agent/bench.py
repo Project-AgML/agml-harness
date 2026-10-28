@@ -61,6 +61,7 @@ RETRIEVE_SCHEMA = {
             "- candidates: up to 4 names to check. Returns reference text for each (taxonomy, hosts, symptoms, "
             "identification notes) to compare against the image. With a description too, each excerpt is narrowed to "
             "the parts matching it.\n"
+            "Typical use: describe what you see, then check the most likely causes from the results with candidates. "
             "Names are looked up by name only: put symptoms in description, not in candidate names. Every excerpt "
             "comes with its source URL."
         ),
@@ -94,6 +95,11 @@ RETRIEVE_SCHEMA = {
 }
 
 PER_CHUNK_CHARS = 1200
+# After a description search. Pilot 2: the model answered with the first page's cause and never checked it, and a
+# search always returns pages, even for a healthy plant.
+NEXT_STEP = ("\n\nThis is a search by symptoms, not a diagnosis: it returns pages even when nothing is wrong. Before "
+             "answering, check the most likely causes (from these pages or your own) with candidates and compare their "
+             "symptoms with the image.")
 RESULT_CHARS = 6000
 LIVE_LOOKUPS = 4  # concurrent live lookups across all items: the search backends rate-limit
 
@@ -179,14 +185,15 @@ def run_retrieve(description: str = "", candidates: list | None = None, crop: st
                 f"No results found for {c['name']!r}. Try its scientific name or aliases, or another candidate.")
             sections.append(f"## {c['name']}\n{body}")
         return "\n\n".join(sections)
-    pages = _cached(["description", description.strip().lower(), crop.lower(), task],
+    # "v2": pages cached before index pages were skipped are not reused
+    pages = _cached(["description-v2", description.strip().lower(), crop.lower(), task],
                     lambda: search_description(description, crop, task))
     if not pages:
         return ("No pages matched this description. Try fewer, more specific symptom words, or give candidate names "
                 "to check, or answer from the image.")
-    return ("Pages matching the description (titles usually name the cause; check likely ones with candidates):\n\n"
+    return ("Pages matching the description (titles usually name the cause):\n\n"
             + _join([f"[{p['site']}] {p['title']}: {focus(p['text'], description, PER_CHUNK_CHARS)} (source: {p['url']})"
-                     for p in pages], RESULT_CHARS))
+                     for p in pages], RESULT_CHARS - len(NEXT_STEP)) + NEXT_STEP)
 
 
 # name -> (schema, function). Only external-database tools: see the leakage policy above.

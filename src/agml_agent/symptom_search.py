@@ -18,6 +18,9 @@ import re
 from agml_agent.common.scrape import search_and_extract
 
 SEARCH_SITES = ["ipm.ucanr.edu", "bugwood.org"]  # fact sheets; apsnet.org hits are mostly paywalled journal pages
+# Crop index pages (ipm.ucanr.edu/agriculture/<crop>/) list every pest of the crop and name no cause; they matched
+# symptom searches and took a result slot (pilot 2). Pest pages are one level deeper.
+INDEX_PAGES = [r"ipm\.ucanr\.edu/agriculture/[^/]+/?$"]
 QUERY_WORDS = 8  # search engines answer short site-restricted queries; long descriptions get nothing
 
 _STOP = set("""a an and are as at be but by for from has have in into is it its leaf leaves of on or plant plants
@@ -32,6 +35,7 @@ def focus(text: str, description: str, max_len: int) -> str:
     """The sentences of `text` sharing the most words with `description`, in their original order, up to
     `max_len` chars; `text` itself (up to `max_len`) when it already fits or nothing overlaps. Selects the relevant
     part; it does not score how well the class fits."""
+    text = re.sub(r"\s*\n\s*", "\n", re.sub(r"[ \t]+", " ", text)).strip()  # scraped pages carry layout whitespace
     want = _words(description)
     sents = re.split(r"(?<=[.!?])\s+|\n+", text)
     scored = [(len(want & _words(s)), i) for i, s in enumerate(sents)]
@@ -55,6 +59,6 @@ def search_description(description: str, crop: str = "", task: str = "", keep: i
                                if len(w) > 2 and w not in _STOP))[:QUERY_WORDS]
     query = " ".join([x for x in (crop, task) if x] + words)
     hits = search_and_extract(query, SEARCH_SITES, [crop] if crop else [], max_results=8, keep=keep,
-                              avoid_url_substrings=["imgrecruit", "listxtax"])
+                              avoid_url_substrings=["imgrecruit", "listxtax"], skip_url_patterns=INDEX_PAGES)
     return [{"site": next(s for s in SEARCH_SITES if s in h["url"]), "title": h["title"], "url": h["url"], "text": h["text"]}
             for h in hits]

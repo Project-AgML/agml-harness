@@ -177,8 +177,27 @@ def test_description_search(monkeypatch, no_cache):
     out = bench.run_retrieve("puckered leaf", crop="bean", task="disease")
     assert got == [("puckered leaf", "bean", "disease")]
     assert "[ipm.ucanr.edu] Bean Common Mosaic: Leaves pucker. (source: https://ipm.ucanr.edu/bcm)" in out
+    assert out.endswith(bench.NEXT_STEP) and "check the most likely causes" in out
     monkeypatch.setattr(ss, "search_description", lambda *a: [])
     assert bench.run_retrieve("nothing").startswith("No pages matched")
+
+
+def test_description_search_skips_crop_index_pages(monkeypatch):
+    import agml_agent.common.scrape as sc
+    import agml_agent.symptom_search as ss
+    urls = ["https://ipm.ucanr.edu/agriculture/dry-beans/", "https://ipm.ucanr.edu/agriculture/dry-beans/bean-rust/",
+            "https://ipm.ucanr.edu/home-and-landscape/bean-rust"]
+
+    class FakeDDGS:
+        def text(self, q, **kw):
+            return [{"href": u, "title": u} for u in urls]
+
+    fetched = []
+    monkeypatch.setattr(sc, "DDGS", FakeDDGS)
+    monkeypatch.setattr(sc, "FETCH_SLEEP", 0)
+    monkeypatch.setattr(sc, "fetch_and_extract", lambda u: fetched.append(u) or "bean rust pustules")
+    pages = ss.search_description("pustules", crop="bean")
+    assert fetched == urls[1:] and [p["url"] for p in pages] == urls[1:]
 
 
 def test_cache_persists_results_but_not_empties(monkeypatch, tmp_path):

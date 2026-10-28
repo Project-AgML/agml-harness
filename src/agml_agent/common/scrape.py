@@ -7,6 +7,7 @@ it's about this specific class)."""
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 import requests
@@ -58,6 +59,7 @@ def search_and_extract(
     max_results: int = 6,
     keep: int = 2,
     avoid_url_substrings: list[str] | None = None,
+    skip_url_patterns: list[str] | None = None,
 ) -> list[dict]:
     """Returns up to `keep` dicts: {title, url, text, matched_term}. Empty
     `match_terms` keeps every extracted page (matched_term "") — for free-text
@@ -66,7 +68,8 @@ def search_and_extract(
     avoid_url_substrings deprioritizes matching hits (e.g. "/pdf/" links that
     trafilatura can't extract text from) rather than dropping them outright —
     they're tried last, so a source whose only hits are PDFs still gets
-    something instead of nothing."""
+    something instead of nothing. skip_url_patterns (regexes) drops hits
+    outright, before fetching, e.g. index pages that only list other pages."""
     # Search engines differ in which site-restricted queries they answer, and long multi-site queries often get
     # nothing anywhere: try the combined query, then one site at a time, each across several engines.
     queries = [f"({' OR '.join(f'site:{s}' for s in sites)}) {query}"] if len(sites) > 1 else []
@@ -97,7 +100,7 @@ def search_and_extract(
         if len(found) >= keep:
             break
         url = hit.get("href")
-        if not url or not any(s in url for s in sites):
+        if not url or not any(s in url for s in sites) or any(re.search(p, url) for p in skip_url_patterns or []):
             continue
         try:
             text = fetch_and_extract(url)
