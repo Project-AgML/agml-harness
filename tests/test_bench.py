@@ -10,6 +10,7 @@ from PIL import Image
 from agbench.eval import Benchmark, VLMMethod
 
 from agml_agent import bench
+from agml_agent.common import cache
 
 
 def _cls(root: Path, name: str, labels: list[str], crops: list[str], per: int = 3):
@@ -154,7 +155,7 @@ GBIF = {"gbif": [{"excerpt_text": "Scientific name: Phytophthora infestans", "so
 
 @pytest.fixture
 def no_cache(monkeypatch):
-    monkeypatch.setattr(bench, "CACHE", None)
+    monkeypatch.setattr(cache, "CACHE", None)
 
 
 def test_retrieve_result_is_text_only(monkeypatch, no_cache):
@@ -216,11 +217,11 @@ def test_cache_persists_results_but_not_empties(monkeypatch, tmp_path):
     import agml_agent.retrieve as r
     n = []
     monkeypatch.setattr(r, "retrieve", lambda *a, **k: n.append(1) or ({} if len(n) == 1 else GBIF))
-    monkeypatch.setattr(bench, "CACHE", bench.RetrievalCache(tmp_path / "c.jsonl"))
+    monkeypatch.setattr(cache, "CACHE", cache.RetrievalCache(tmp_path / "c.jsonl"))
     for _ in range(3):
         bench.run_retrieve(candidates=["late blight"])
     assert len(n) == 2  # empty -> retried; found -> cached
-    monkeypatch.setattr(bench, "CACHE", bench.RetrievalCache(tmp_path / "c.jsonl"))  # a later run
+    monkeypatch.setattr(cache, "CACHE", cache.RetrievalCache(tmp_path / "c.jsonl"))  # a later run
     assert "Phytophthora" in bench.run_retrieve(candidates=["Late Blight "]) and len(n) == 2
 
 
@@ -237,3 +238,35 @@ def test_tool_server_flags():
     assert bench.tool_args("nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF") == []
     with pytest.raises(ValueError, match="tool_parsers.yaml"):
         bench.tool_args("some/unlisted-model")
+
+
+def test_search_and_pages_are_cached_whatever_the_names(monkeypatch, tmp_path):
+    import agml_agent.common.scrape as sc
+    from agml_agent.sources import ucipm_aps
+    from agml_agent.sources.base import ClassQuery
+    searched, fetched = [], []
+
+    class FakeDDGS:
+        def text(self, q, **kw):
+            searched.append(q)
+            return [{"href": "https://ipm.ucanr.edu/bean-rust", "title": "Bean rust"}]
+
+    monkeypatch.setattr(sc, "DDGS", FakeDDGS)
+    monkeypatch.setattr(sc, "FETCH_SLEEP", 0)
+    monkeypatch.setattr(sc, "fetch_and_extract", lambda u: fetched.append(u) or "Bean rust, Uromyces appendiculatus.")
+    monkeypatch.setattr(cache, "CACHE", cache.RetrievalCache(tmp_path / "c.jsonl"))
+    ucipm_aps.fetch(ClassQuery("bean rust", "bean"))
+    monkeypatch.setattr(cache, "CACHE", cache.RetrievalCache(tmp_path / "c.jsonl"))  # a later run
+    chunks = ucipm_aps.fetch(ClassQuery("bean rust", "bean", scientific_name="Uromyces appendiculatus"))
+    assert len(searched) == 1 and len(fetched) == 1 and chunks[0].source_url == "https://ipm.ucanr.edu/bean-rust"
+
+
+def test_prefill_lookups():
+    from types import SimpleNamespace as NS
+    from agml_agent.bench_prefill import lookups
+    items = [NS(task="classification", ag_task="disease", crop="Bean", class_names=["bean rust", "Healthy", "4"]),
+             NS(task="classification", ag_task="species_id", crop="plant", class_names=["Swinecress"]),
+             NS(task="classification", ag_task="disease", crop="tomato or grape", class_names=["bean rust"]),
+             NS(task="detection", ag_task="disease", crop="bean", class_names=["blight"])]
+    assert lookups(items) == [("bean rust", "bean", "disease"), ("Healthy", "bean", "disease"),
+                              ("bean rust", "", "disease"), ("Healthy", "", "disease"), ("Swinecress", "", "species")]

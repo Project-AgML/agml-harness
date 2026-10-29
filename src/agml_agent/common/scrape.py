@@ -9,17 +9,20 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections import Counter
 
 import requests
 import trafilatura
 from ddgs import DDGS
 
+from agml_agent.common.cache import cached
 from agml_agent.common.http import HEADERS, TIMEOUT
 
 log = logging.getLogger(__name__)
 
 FETCH_SLEEP = 1.0
 BACKENDS = ["auto", "yahoo", "google", "brave"]  # ddgs 9.x engines; "auto" picks among them itself
+STATS = Counter()  # live searches and how many found nothing; read by bench_prefill to tell if search works here
 
 
 def fetch_and_extract(url: str) -> str | None:
@@ -74,18 +77,7 @@ def search_and_extract(
     # nothing anywhere: try the combined query, then one site at a time, each across several engines.
     queries = [f"({' OR '.join(f'site:{s}' for s in sites)}) {query}"] if len(sites) > 1 else []
     queries += [f"site:{s} {query}" for s in sites]
-    hits: list[dict] = []
-    for q in queries:
-        for backend in BACKENDS:
-            try:
-                hits = list(DDGS().text(q, max_results=max_results, backend=backend))
-            except Exception as e:
-                log.debug("search failed for %r on %s: %s", q, backend, e)
-            if hits:
-                break
-            time.sleep(1)
-        if hits:
-            break
+    hits = cached(["search", queries, max_results], lambda: _search(queries, max_results))
     if not hits:
         log.warning("no search results for %r on any site/engine — DDGS backends can be flaky/rate-limited at scale, "
                     "retry this class individually if it matters", query)
@@ -103,7 +95,7 @@ def search_and_extract(
         if not url or not any(s in url for s in sites) or any(re.search(p, url) for p in skip_url_patterns or []):
             continue
         try:
-            text = fetch_and_extract(url)
+            text = cached(["page", url], lambda: _fetch(url))
             if not text:
                 continue
             matched = find_match(text, match_terms) if match_terms else ""
@@ -117,5 +109,26 @@ def search_and_extract(
             })
         except Exception as e:
             log.debug("fetch/extract failed for %s: %s", url, e)
-        time.sleep(FETCH_SLEEP)
     return found
+
+
+def _search(queries: list[str], max_results: int) -> list[dict]:
+    STATS["searches"] += 1
+    for q in queries:
+        for backend in BACKENDS:
+            try:
+                hits = list(DDGS().text(q, max_results=max_results, backend=backend))
+            except Exception as e:
+                log.debug("search failed for %r on %s: %s", q, backend, e)
+                hits = []
+            if hits:
+                return hits
+            time.sleep(1)
+    STATS["empty"] += 1
+    return []
+
+
+def _fetch(url: str) -> str | None:
+    text = fetch_and_extract(url)
+    time.sleep(FETCH_SLEEP)  # only after live fetches: cached pages need no politeness delay
+    return text

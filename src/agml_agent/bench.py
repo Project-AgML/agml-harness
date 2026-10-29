@@ -47,6 +47,9 @@ from dotenv import load_dotenv
 from agbench.eval import Benchmark, EvalItem, Prediction, VLMMethod
 from agbench.eval.client import encode_image
 
+from agml_agent.common import cache
+from agml_agent.common.cache import RetrievalCache
+
 MAX_CANDIDATES = 4
 
 RETRIEVE_SCHEMA = {
@@ -124,47 +127,14 @@ NEXT_STEP = ("\n\nThis is a search by symptoms, not a diagnosis: it returns page
              "symptoms with the image.")
 RESULT_CHARS = 6000
 LIVE_LOOKUPS = 4  # concurrent live lookups across all items: the search backends rate-limit
-
-
-class RetrievalCache:
-    """Lookup results kept across runs (JSON lines: {key, value}), so a full run doesn't repeat the same slow,
-    rate-limited lookups and every model sees the same retrieved text. Empty results are not stored: they are
-    often transient search failures."""
-
-    def __init__(self, path: str | Path):
-        self.path, self._lock = Path(path), threading.Lock()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.data = {}
-        if self.path.exists():
-            for line in self.path.read_text().splitlines():
-                r = json.loads(line)
-                self.data[r["key"]] = r["value"]
-
-    def get(self, key: str):
-        return self.data.get(key)
-
-    def put(self, key: str, value) -> None:
-        if not value:
-            return
-        with self._lock:
-            self.data[key] = value
-            with open(self.path, "a") as f:
-                f.write(json.dumps({"key": key, "value": value}, ensure_ascii=False) + "\n")
-
-
-CACHE: RetrievalCache | None = None  # set by run()
 _live = threading.Semaphore(LIVE_LOOKUPS)
 
 
 def _cached(key: list, fetch):
-    k = json.dumps(key)
-    if CACHE and (hit := CACHE.get(k)) is not None:
-        return hit
-    with _live:
-        value = fetch()
-    if CACHE:
-        CACHE.put(k, value)
-    return value
+    def live():
+        with _live:
+            return fetch()
+    return cache.cached(key, live)
 
 
 def _lookup(c: dict, crop: str, task: str) -> dict:
@@ -274,7 +244,7 @@ class HarnessMethod(VLMMethod):
         return {**super().config(), "name": self.name, "harness": "exploit", "tools": self.tools,
                 "max_tool_calls": self.max_tool_calls, "retrieve_mode": self.retrieve_mode, "agml_agent": importlib.metadata.version("agml-agent"),
                 "agml_agent_git": _git_sha(Path(__file__).parent), "agbench_commit": _agbench_commit(),
-                "retrieve_cache": str(CACHE.path) if CACHE else None}
+                "retrieve_cache": str(cache.CACHE.path) if cache.CACHE else None}
 
     async def _create(self, **kw):
         err = None
@@ -398,9 +368,8 @@ def run(args: argparse.Namespace) -> Path:
     from agbench.eval.runner import log_compute
     from agbench.eval.servers import Server
 
-    global CACHE
     load_dotenv()
-    CACHE = None if args.no_retrieve_cache else RetrievalCache(args.retrieve_cache or args.out / "retrieve_cache.jsonl")
+    cache.CACHE = None if args.no_retrieve_cache else RetrievalCache(args.retrieve_cache or args.out / "retrieve_cache.jsonl")
     bench = Benchmark(args.data_dir, args.task or None, args.format or None, args.only, args.limit_per_dataset, args.seed)
     print(f"{len(bench.items)} items; {len(bench.skipped)} datasets skipped")
     spec = model_spec(args.model)

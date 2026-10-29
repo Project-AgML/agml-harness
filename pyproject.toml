@@ -33,6 +33,7 @@ agml-agent-search = "agml_agent.search_agml:main"
 agml-agent-chat = "agml_agent.chat:main"
 agml-agent-bench = "agml_agent.bench:main"
 agml-agent-view = "agml_agent.bench_view:main"
+agml-agent-bench-prefill = "agml_agent.bench_prefill:main"
 
 [tool.uv.sources]
 # Pinned: harness runs must use the exact benchmark code the baselines were run with. Bump `rev`
