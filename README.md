@@ -87,7 +87,10 @@ Returns `{source_name: [chunk, ...]}`. Each chunk:
 `task`: `disease` \| `pest` \| `species` \| `quality`.
 `sources`: restrict to specific source names (default: all active sources).
 
-**Sources**: EPPO, UC IPM/APS, Bugwood, GBIF, USDA NALT, USDA PLANTS, USDA AMS Grade Standards. Configured in `src/agml_agent/config/sources.yaml`.
+**Sources**: EPPO, UC IPM/APS, Bugwood, GBIF, USDA NALT, USDA PLANTS, USDA AMS Grade Standards, and open sources with
+no key: TNAU Agritech, APS Plant Disease Lessons, PNW and Texas plant disease handbooks, NC State Extension, ProMusa,
+PlantVillage, Feedipedia, Wikipedia, iNaturalist, Catalogue of Life, EOL. Configured in `src/agml_agent/config/sources.yaml`
+(fact-sheet sites share one fetcher, `sources/factsheets.py`, configured per site with `args`).
 
 ### `search_agml(query="", exact_name=None, ml_task=None, ag_task=None, limit=10)`
 
@@ -114,13 +117,13 @@ uv run agml-agent-bench ... --run-dir runs/<run>                                
   prompt unchanged. The model's server is started with tool calling on (`config/tool_parsers.yaml`), or pass
   `--endpoint` for one already running with tools on.
 - **Leakage:** only external-database tools are allowed (`retrieve`); `search_agml` is refused because AgML class
-  lists and benchmark results would leak labels. `retrieve` results reach the model as excerpt text and source
+  lists and benchmark results would leak labels. Text about datasets or machine learning is dropped from every source. `retrieve` results reach the model as excerpt text and source
   URLs only, never images.
 - **The `retrieve` tool** takes a `description` of what the model sees and/or up to 4 `candidates` (name,
-  scientific name, aliases), plus `crop` and `task` (both optional; they order results, they never filter: every database is searched). A description searches UC IPM and Bugwood fact sheets
-  (site-restricted, never the open web) and returns pages with matching features, those mentioning the crop first and
-  then pages about other hosts (the crop never filters pages out); candidates are looked
-  up by name in every database (EPPO, UC IPM/APS, Bugwood, GBIF, USDA), with long excerpts narrowed to the
+  scientific name, aliases), plus `crop` and `task` (both optional; they order results, they never filter: every database is searched). A description searches the fact-sheet sites (UC IPM, Bugwood, TNAU, APS lessons, PNW and Texas handbooks,
+  NC State, ProMusa, PlantVillage; site-restricted, never the open web) and Wikipedia, and returns pages with matching
+  features, those mentioning the crop first and then pages about other hosts, sources taking turns; candidates are looked
+  up by name in every database, with long excerpts narrowed to the
   sentences matching the description. `--retrieve-mode candidates` offers name checks only (no description
   search), to compare the two. Lookups are cached in `<out>/retrieve_cache.jsonl` across runs
   (`--retrieve-cache`, `--no-retrieve-cache`), so repeated classes are fast and every model sees the same text.
@@ -145,9 +148,12 @@ uv run agml-agent-view --runs runs/<harness run> --baseline <baseline run> --dat
 
 - **Tool use:** how often each tool was called, overall and per task; per baseline, which items the tools fixed and
   which they broke.
+- **Sources:** per source, the items where its text was shown to the model and where the model used it (repeated a
+  phrase or page title from it), with fixed / broken counts against the baseline, next to the noise level (items with no
+  tool call).
 - **Traces:** per item, the image, prompt, ground truth, the harness and baseline answers with scores, and every model
   turn: reasoning, each tool call with its arguments, and the tool result with its latency. Filter by run, dataset,
-  format, tool use and fixed/broken.
+  format, tool use, fixed/broken and source.
 
 `--runs` takes run dirs or folders of them (several harness runs can be compared); `--data-dir` is only needed when
 images live elsewhere than when the runs were made.

@@ -16,6 +16,11 @@
 #
 # verified: whether a live endpoint for this source was actually hit and
 # confirmed working while this pipeline was built (not just documented).
+#
+# args: keyword arguments passed to the module's fetch() (one module, several
+# sites: agml_agent.sources.factsheets).
+# description_sites: the source is also searched by description of what is
+# seen (symptom_search.py), restricted to these sites.
 
 sources:
   - name: eppo
@@ -33,6 +38,7 @@ sources:
     verified: true
     license: "UC IPM / APSnet — public pages, no redistribution license stated; attribute source_url"
     status: active
+    description_sites: [ipm.ucanr.edu]  # apsnet.org hits are mostly paywalled journal pages
 
   - name: plantwise
     module: agml_agent.sources.plantwise
@@ -53,6 +59,7 @@ sources:
     verified: true
     license: "CC-BY or CC-BY-NC per item — verify per row before commercial/deployment use; see license field"
     status: active
+    description_sites: [bugwood.org]
 
   - name: gbif
     module: agml_agent.sources.gbif
@@ -95,3 +102,115 @@ sources:
     verified: false
     license: "Subscription/institutional — CABI Compendium"
     status: parked   # no API, no bulk export except a manual data-request form
+
+  # Open sources added 2026-10-29 (no key; checked with our own requests). Fact-sheet sites share one fetcher.
+  - name: tnau_agritech
+    module: agml_agent.sources.factsheets
+    args: {sites: [agritech.tnau.ac.in]}
+    description_sites: [agritech.tnau.ac.in]
+    task: [disease, pest]
+    access: scrape
+    verified: true    # India: groundnut, black gram, betel, turmeric, mango...
+    license: "TNAU Agritech Portal — public pages; attribute source_url"
+    status: active
+
+  - name: aps_lessons
+    module: agml_agent.sources.factsheets
+    args: {sites: [apsnet.org/edcenter]}
+    description_sites: [apsnet.org/edcenter]
+    task: [disease]
+    access: scrape
+    verified: true    # Plant Disease Lessons / Plant Health Instructor: free, unlike APS journals
+    license: "APS Education Center — public pages; attribute source_url"
+    status: active
+
+  - name: pnw_handbooks
+    module: agml_agent.sources.factsheets
+    args: {sites: [pnwhandbooks.org]}
+    description_sites: [pnwhandbooks.org]
+    task: [disease, pest, species]
+    access: scrape
+    verified: true    # host -> disease pages (cause, symptoms); also insect and weed handbooks
+    license: "Pacific Northwest Handbooks — public pages; attribute source_url"
+    status: active
+
+  - name: texas_pdh
+    module: agml_agent.sources.factsheets
+    args: {sites: [plantdiseasehandbook.tamu.edu]}
+    description_sites: [plantdiseasehandbook.tamu.edu]
+    task: [disease]
+    access: scrape
+    verified: true
+    license: "Texas Plant Disease Handbook — public pages; attribute source_url"
+    status: active
+
+  - name: ncsu_extension
+    module: agml_agent.sources.factsheets
+    args: {sites: [content.ces.ncsu.edu]}
+    description_sites: [content.ces.ncsu.edu]
+    task: [disease, pest, species]
+    access: scrape
+    verified: true
+    license: "NC State Extension — public pages; attribute source_url"
+    status: active
+
+  - name: promusa
+    module: agml_agent.sources.factsheets
+    args: {sites: [promusa.org]}
+    description_sites: [promusa.org]
+    task: [disease, pest]
+    access: scrape
+    verified: true    # banana only
+    license: "ProMusa — public pages; attribute source_url"
+    status: active
+
+  - name: plantvillage
+    module: agml_agent.sources.factsheets
+    args: {sites: [plantvillage.psu.edu]}
+    description_sites: [plantvillage.psu.edu]
+    task: [disease, pest]
+    access: scrape
+    verified: true    # info pages only; AgML has a PlantVillage *dataset* — the bench leakage filter drops pages about datasets
+    license: "PlantVillage — public pages; attribute source_url"
+    status: active
+
+  - name: feedipedia
+    module: agml_agent.sources.factsheets
+    args: {sites: [feedipedia.org]}
+    task: [species]
+    access: scrape
+    verified: true    # feed and forage plants
+    license: "Feedipedia (INRAE, CIRAD, AFZ, FAO) — public pages; attribute source_url"
+    status: active
+
+  - name: wikipedia
+    module: agml_agent.sources.wikipedia
+    task: [disease, pest, species, quality]
+    access: free_api
+    verified: true    # also searched by description (symptom_search.py, via its own search API)
+    license: "CC BY-SA 4.0"
+    status: active
+
+  - name: inaturalist
+    module: agml_agent.sources.inaturalist
+    task: [species, disease, pest]
+    access: free_api
+    verified: true
+    license: "iNaturalist taxon data; Wikipedia summary CC BY-SA"
+    status: active
+
+  - name: catalogue_of_life
+    module: agml_agent.sources.catalogue_of_life
+    task: [species, disease, pest]
+    access: free_api
+    verified: true
+    license: "CC BY 4.0"
+    status: active
+
+  - name: eol
+    module: agml_agent.sources.eol
+    task: [species, disease, pest]
+    access: free_api
+    verified: true    # classic API without a key; heavy use asks for one
+    license: "per-object, mostly CC BY / CC BY-SA"
+    status: active

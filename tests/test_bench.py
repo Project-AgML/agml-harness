@@ -153,6 +153,15 @@ GBIF = {"gbif": [{"excerpt_text": "Scientific name: Phytophthora infestans", "so
                   "raw_response": '{"media": "https://img/1.jpg"}', "extra": {"images": [{"url": "https://img/1.jpg"}]}}]}
 
 
+@pytest.fixture(autouse=True)
+def two_description_sources(monkeypatch):
+    """Description search over UC IPM and Bugwood only, no Wikipedia: tests make no network calls."""
+    import agml_agent.sources.wikipedia as wp
+    import agml_agent.symptom_search as ss
+    monkeypatch.setattr(ss, "description_sources", lambda: {"ucipm_aps": ["ipm.ucanr.edu"], "bugwood": ["bugwood.org"]})
+    monkeypatch.setattr(wp, "search", lambda *a, **k: [])
+
+
 @pytest.fixture
 def no_cache(monkeypatch):
     monkeypatch.setattr(cache, "CACHE", None)
@@ -198,17 +207,17 @@ def test_description_search(monkeypatch, no_cache):
     import agml_agent.symptom_search as ss
     got = []
     monkeypatch.setattr(ss, "search_description", lambda d, c, t: got.append((d, c, t)) or [
-        {"site": "ipm.ucanr.edu", "title": "Bean Common Mosaic", "url": "https://ipm.ucanr.edu/bcm", "text": "Leaves pucker.",
+        {"source": "ucipm_aps", "title": "Bean Common Mosaic", "url": "https://ipm.ucanr.edu/bcm", "text": "Leaves pucker.",
          "mentions_crop": True},
-        {"site": "bugwood.org", "title": "Soybean mosaic", "url": "https://bugwood.org/smv", "text": "Leaves pucker.",
+        {"source": "bugwood", "title": "Soybean mosaic", "url": "https://bugwood.org/smv", "text": "Leaves pucker.",
          "mentions_crop": False}])
     out = bench.run_retrieve("puckered leaf", crop="bean", task="disease")
     assert got == [("puckered leaf", "bean", "disease")]
-    assert "[ipm.ucanr.edu] Bean Common Mosaic: Leaves pucker. (source: https://ipm.ucanr.edu/bcm)" in out
-    assert "[bugwood.org] Soybean mosaic (does not mention bean): Leaves pucker." in out
+    assert "[ucipm_aps] Bean Common Mosaic: Leaves pucker. (source: https://ipm.ucanr.edu/bcm)" in out
+    assert "[bugwood] Soybean mosaic (does not mention bean): Leaves pucker." in out
     assert out.endswith(bench.NEXT_STEP) and "check the most likely causes" in out
     monkeypatch.setattr(ss, "search_description", lambda *a: [])
-    assert bench.run_retrieve("nothing").startswith("UC IPM and Bugwood returned no pages")
+    assert bench.run_retrieve("nothing").startswith("No fact-sheet or Wikipedia pages matched")
 
 
 def test_description_search_skips_crop_index_pages(monkeypatch):
@@ -309,17 +318,28 @@ def test_prefill_lookups():
 
 def test_search_asks_each_site_when_first_answer_is_all_skipped(monkeypatch, no_cache):
     import agml_agent.common.scrape as sc
-    import agml_agent.symptom_search as ss
     asked = []
 
     class FakeDDGS:
         def text(self, q, **kw):
             asked.append(q)
             return ([{"href": "https://wiki.bugwood.org/Rust", "title": "Rust"}] if " OR " in q
-                    else [{"href": "https://ipm.ucanr.edu/home-and-landscape/rust/", "title": "Rust"}] if "ucanr" in q else [])
+                    else [{"href": "https://ipm.ucanr.edu/rust/", "title": "Rust"}] if "ucanr" in q else [])
 
     monkeypatch.setattr(sc, "DDGS", FakeDDGS)
     monkeypatch.setattr(sc, "FETCH_SLEEP", 0)
     monkeypatch.setattr(sc, "fetch_and_extract", lambda u: "Rust: orange pustules.")
-    assert [p["url"] for p in ss.search_description("orange pustules")] == ["https://ipm.ucanr.edu/home-and-landscape/rust/"]
-    assert len(asked) == 2
+    hits = sc.search_and_extract("rust", ["ipm.ucanr.edu", "bugwood.org"], ["rust"], skip_url_patterns=[r"wiki\.bugwood"])
+    assert [h["url"] for h in hits] == ["https://ipm.ucanr.edu/rust/"] and len(asked) == 2
+
+
+def test_dataset_text_never_reaches_the_model_and_sources_take_turns(monkeypatch, no_cache):
+    import agml_agent.retrieve as r
+    ch = lambda t, u: {"excerpt_text": t, "source_url": u}
+    monkeypatch.setattr(r, "retrieve", lambda *a, **k: {
+        "ucipm_aps": [ch("Rust: orange pustules.", "https://ipm/1"), ch("Rust management.", "https://ipm/2")],
+        "plantvillage": [ch("The PlantVillage dataset has 54,000 images.", "https://pv/1")],
+        "wikipedia": [ch("Rusts are plant diseases caused by fungi.", "https://wiki/1")]})
+    out = bench.run_retrieve(candidates=["rust"], task="disease")
+    assert "dataset" not in out and "[plantvillage]" not in out
+    assert out.index("https://ipm/1") < out.index("https://wiki/1") < out.index("https://ipm/2")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from collections import Counter
 
@@ -22,6 +23,7 @@ log = logging.getLogger(__name__)
 
 FETCH_SLEEP = 1.0
 BACKENDS = ["auto", "yahoo", "google", "brave"]  # ddgs 9.x engines; "auto" picks among them itself
+SEARCHES = threading.Semaphore(4)  # concurrent web searches across all sources and lookups: the engines rate-limit
 STATS = Counter()  # live searches and how many found nothing; read by bench_prefill to tell if search works here
 
 
@@ -119,6 +121,11 @@ def search_and_extract(
 
 
 def _search(queries: list[str], max_results: int) -> list[dict]:
+    with SEARCHES:
+        return _search_live(queries, max_results)
+
+
+def _search_live(queries: list[str], max_results: int) -> list[dict]:
     STATS["searches"] += 1
     for q in queries:
         for backend in BACKENDS:

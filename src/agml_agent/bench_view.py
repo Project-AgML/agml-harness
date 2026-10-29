@@ -15,9 +15,47 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+
+# Runs before results were labelled by source name labelled description pages by site.
+OLD_LABELS = {"ipm.ucanr.edu": "ucipm_aps", "bugwood.org": "bugwood"}
+BLOCK = re.compile(r"^\[([a-z_.]+)\] ?(.*?)(?=^\[[a-z_.]+\] |^## |\Z)", re.M | re.S)
+
+
+def _shingles(text: str, n: int = 4) -> set[tuple]:
+    w = re.findall(r"[a-z0-9]+", text.lower())
+    return {tuple(w[i:i + n]) for i in range(len(w) - n + 1)}
+
+
+def _source_names() -> set[str]:
+    from agml_agent.retrieve import _load_sources
+
+    return set(_load_sources()) | set(OLD_LABELS)
+
+
+def source_use(trace: list | None) -> tuple[list[str], list[str]]:
+    """(sources shown, sources used) in one item's trace. Shown: the source's text was in a tool result. Used: the
+    model's later reasoning or answer repeats a 4-word phrase from that text (at least 2), or a page title from it."""
+    shown, used, known = [], [], _source_names()
+    for i, s in enumerate(trace or []):
+        if s.get("role") != "tool":
+            continue
+        later = " ".join((t.get("reasoning") or "") + " " + (t.get("text") or "") for t in trace[i + 1:] if t.get("role") == "assistant")
+        later_sh, later_low = _shingles(later), later.lower()
+        for m in BLOCK.finditer(str(s.get("result", ""))):
+            if m.group(1) not in known:  # a bracketed word inside page text, not a source label
+                continue
+            src, body = OLD_LABELS.get(m.group(1), m.group(1)), m.group(2)
+            body = re.sub(r"\(source: [^)]*\)", "", body)
+            title = body.split(":", 1)[0].strip().lower() if ":" in body[:150] else ""
+            shown.append(src)
+            if len(_shingles(body) & later_sh) >= 2 or (len(title) > 12 and title in later_low):
+                used.append(src)
+    return sorted(set(shown)), sorted(set(used))
 
 
 def main() -> None:
@@ -68,6 +106,8 @@ def app() -> None:
             p["tools_used"] = [tr.get(i, {}).get("tools_used", []) for i in p.item_id]
             p["tool_s"] = [tr.get(i, {}).get("tool_s", 0.0) for i in p.item_id]
             p["trace"] = [tr.get(i, {}).get("trace") for i in p.item_id]
+            use = [source_use(t) for t in p.trace]
+            p["sources_shown"], p["sources_used"] = [u[0] for u in use], [u[1] for u in use]
         return p
 
     def image_path(path: str) -> str | None:
@@ -124,6 +164,56 @@ def app() -> None:
                 t["baseline"], t["harness"] = (t.baseline * 100).round(1), (t.harness * 100).round(1)
                 st.dataframe(t, width="stretch")
 
+    def page_sources():
+        st.title("Sources")
+        if not harness:
+            st.info(f"No harness runs (with traces.jsonl) under {args.runs}.")
+            return
+        bs = base_scores()
+        if not len(bs.columns):
+            st.info("Pass a baseline run (--baseline) to see which items each source fixed or broke.")
+        st.caption("Shown: the source's text was in a tool result for the item. Used: the model's later reasoning or "
+                   "answer repeats a phrase (2+ four-word phrases) or a page title from it. Fixed / broken: against the "
+                   "baseline (baseline wrong, harness right / the reverse). An item counts for every source it showed, so "
+                   "sources overlap. Compare with the noise line: items where no tool was called, which flip only from "
+                   "sampling.")
+        for r in harness:
+            p = frame(r["dir"])
+            if "sources_shown" not in p:
+                continue
+            st.subheader(r["name"])
+            j = p.set_index("item_id")
+            if len(bs.columns):
+                j = j.join(bs.iloc[:, 0].rename("base"), how="inner")
+                j["fixed"], j["broken"] = (j.base < 0.5) & (j.score >= 0.5), (j.base >= 0.5) & (j.score < 0.5)
+            rows = []
+            for src in sorted({x for xs in j.sources_shown for x in xs}):
+                row = {"source": src}
+                for kind in ("shown", "used"):
+                    m = j[f"sources_{kind}"].map(lambda xs: src in xs)
+                    row[f"items {kind}"] = int(m.sum())
+                    if "base" in j:
+                        row[f"fixed ({kind})"], row[f"broken ({kind})"] = int(j.fixed[m].sum()), int(j.broken[m].sum())
+                        row[f"net ({kind})"] = row[f"fixed ({kind})"] - row[f"broken ({kind})"]
+                    row[f"score ({kind}, %)"] = round(j.score[m].mean() * 100, 1) if m.any() else None
+                rows.append(row)
+            t = pd.DataFrame(rows)
+            if "base" in j and len(t):
+                quiet = j.n_tool_calls == 0
+                t = pd.concat([t, pd.DataFrame([{"source": "(noise: no tool call)", "items shown": int(quiet.sum()),
+                                                 "fixed (shown)": int(j.fixed[quiet].sum()),
+                                                 "broken (shown)": int(j.broken[quiet].sum()),
+                                                 "net (shown)": int(j.fixed[quiet].sum() - j.broken[quiet].sum()),
+                                                 "score (shown, %)": round(j.score[quiet].mean() * 100, 1) if quiet.any() else None}])])
+            st.dataframe(t, hide_index=True, width="stretch")
+            if "base" in j and len(t) > 1:
+                st.markdown("**By CV task** (items where the source was used)")
+                by = [{"cv task": cv, "source": src, "items": int(m.sum()), "fixed": int(g.fixed[m].sum()),
+                       "broken": int(g.broken[m].sum())}
+                      for cv, g in j.groupby("cv") for src in sorted({x for xs in g.sources_used for x in xs})
+                      if (m := g.sources_used.map(lambda xs, s=src: s in xs)).any()]
+                st.dataframe(pd.DataFrame(by), hide_index=True, width="stretch")
+
     def show_trace(trace: list):
         step = 0
         for s in trace:
@@ -148,7 +238,7 @@ def app() -> None:
             st.info(f"No harness runs (with traces.jsonl) under {args.runs}.")
             return
         names = {f"{r['name']} · {Path(r['dir']).name}": r["dir"] for r in harness}
-        c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 1, 1, 1, 1])
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 2, 1, 1, 1, 1, 1])
         run_dir = names[c1.selectbox("Run", list(names))]
         p = frame(run_dir)
         dataset = c2.selectbox("Dataset", ["all"] + sorted(p.dataset.unique(), key=str.lower))
@@ -167,6 +257,11 @@ def app() -> None:
             if base != "all":
                 b = v.item_id.map(bs.iloc[:, 0])
                 v = v[(b < 0.5) & (v.score >= 0.5)] if base == "fixed" else v[(b >= 0.5) & (v.score < 0.5)]
+        if "sources_shown" in v:
+            src = c7.selectbox("Source", ["all"] + sorted({x for xs in p.sources_shown for x in xs}),
+                               help="Items where this source was in a tool result")
+            if src != "all":
+                v = v[v.sources_shown.map(lambda xs: src in xs)]
         items = {it["item_id"]: it for it in read_jsonl(Path(run_dir) / "items.jsonl")}
         base_recs = {r["name"]: frame(r["dir"]).set_index("item_id") for r in baselines if len(frame(r["dir"]))}
         st.caption(f"{len(v)} items")
@@ -182,6 +277,9 @@ def app() -> None:
                 with b:
                     st.markdown(f"**{'✅' if r['score'] >= 0.5 else '❌'}** `{r['item_id']}` · {r['dataset']} · {r['cv']} · "
                                 f"ag task: {r['ag_task']} · {int(r['n_tool_calls'])} tool calls, {r['tool_s']:.1f}s")
+                    if r.get("sources_shown"):
+                        st.caption("Sources shown: " + ", ".join(f"**{x}**" if x in r["sources_used"] else x
+                                                                 for x in r["sources_shown"]) + " (bold: used)")
                     if it.get("prompt"):
                         with st.expander("Prompt"):
                             st.text(it["prompt"][:3000])
@@ -194,7 +292,8 @@ def app() -> None:
                         with st.expander(f"Trace ({int(r['n_tool_calls'])} tool calls)", expanded=r["n_tool_calls"] > 0):
                             show_trace(r["trace"])
 
-    st.navigation([st.Page(page_usage, title="Tool use", default=True), st.Page(page_traces, title="Traces")]).run()
+    st.navigation([st.Page(page_usage, title="Tool use", default=True), st.Page(page_sources, title="Sources"),
+                   st.Page(page_traces, title="Traces")]).run()
 
 
 if __name__ == "__main__":

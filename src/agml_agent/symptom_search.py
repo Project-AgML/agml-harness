@@ -2,10 +2,11 @@
 symptom_search — find reference pages from a description of what is seen
 (symptoms, damage, appearance) instead of a class name.
 
-Only the sources that are reached by site-restricted text search can take a
-description: UC IPM and Bugwood. EPPO, GBIF and USDA are name-keyed
-APIs and are not used here. Page titles usually name the disease/pest/species,
-so the result is a candidate list to check with a name lookup (retrieve()). Pages about other crops are kept: a
+Sources reached by site-restricted text search can take a description (the ones with `description_sites` in
+config/sources.yaml: UC IPM, Bugwood, TNAU, APS lessons, PNW and Texas handbooks, NC State, ProMusa, PlantVillage),
+plus Wikipedia through its own search API. EPPO, GBIF, USDA, iNaturalist, Catalogue of Life and EOL are name-keyed
+and are not used here. Page titles usually name the disease/pest/species, so the result is a candidate list to check
+with a name lookup (retrieve()). Pages about other crops are kept: a
 similar problem on a related host is still worth comparing (the wide pilot's empty results all came from requiring the
 crop name on the page: UC IPM/Bugwood barely cover tropical crops).
 
@@ -16,10 +17,10 @@ crop name on the page: UC IPM/Bugwood barely cover tropical crops).
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from agml_agent.common.scrape import search_and_extract
 
-SEARCH_SITES = ["ipm.ucanr.edu", "bugwood.org"]  # fact sheets; apsnet.org hits are mostly paywalled journal pages
 # Navigation pages that matched symptom searches and took result slots without describing any problem: crop index
 # pages (ipm.ucanr.edu/agriculture/<crop>/, pilot 2; pest pages are one level deeper), site sections and menus, the
 # diagnostic tool, and Bugwood image collections (photo captions only).
@@ -32,6 +33,7 @@ CROP_SYNONYMS = [{"groundnut", "peanut"}, {"brinjal", "eggplant", "aubergine"}, 
                  {"chili", "chilli", "chile", "pepper"}, {"okra", "lady finger", "bhindi"}, {"luffa", "sponge gourd"},
                  {"bottle gourd", "calabash"}, {"soybean", "soya", "soybeans"}, {"malabar spinach", "basella"}]
 QUERY_WORDS = 8  # search engines answer short site-restricted queries; long descriptions get nothing
+PER_SOURCE = 2  # pages kept per source before merging
 
 _STOP = set("""a an and are as at be but by for from has have in into is it its leaf leaves of on or plant plants
 shows showing the their there these this those to with without very some small large""".split())
@@ -67,16 +69,35 @@ def crop_names(crop: str) -> list[str]:
     return [crop] + sorted(next((g - {crop} for g in CROP_SYNONYMS if crop in g), set())) if crop else []
 
 
-def search_description(description: str, crop: str = "", task: str = "", keep: int = 4) -> list[dict]:
-    """Up to `keep` pages from UC IPM/Bugwood matching the description's keywords:
-    {site, title, url, text, mentions_crop}. Pages mentioning the crop (or a synonym) come first; the others are kept
-    after them."""
+def description_sources() -> dict[str, list[str]]:
+    """{source name: sites} for the active sources searched by description (config/sources.yaml description_sites)."""
+    from agml_agent.retrieve import _load_sources
+
+    return {n: c["description_sites"] for n, c in _load_sources().items()
+            if c.get("status") == "active" and c.get("description_sites")}
+
+
+def _site_pages(sites: list[str], query: str) -> list[dict]:
+    return search_and_extract(query, sites, [], max_results=6, keep=PER_SOURCE, avoid_url_substrings=["imgrecruit", "listxtax"],
+                              skip_url_patterns=INDEX_PAGES + BLOCKED)
+
+
+def search_description(description: str, crop: str = "", task: str = "", keep: int = 5) -> list[dict]:
+    """Up to `keep` pages matching the description's keywords, from every description source and Wikipedia:
+    {source, title, url, text, mentions_crop}. Pages mentioning the crop (or a synonym) come first; then sources take
+    turns, so one site can't fill the result."""
+    from agml_agent.sources import wikipedia
+
     words = list(dict.fromkeys(w for w in re.findall(r"[a-z]+(?:-[a-z]+)*", description.lower())
                                if len(w) > 2 and w not in _STOP))[:QUERY_WORDS]
     query = " ".join([x for x in (crop, task) if x] + words)
-    hits = search_and_extract(query, SEARCH_SITES, [], max_results=8, keep=8,
-                              avoid_url_substrings=["imgrecruit", "listxtax"], skip_url_patterns=INDEX_PAGES + BLOCKED)
+    jobs = {n: (lambda s=s: _site_pages(s, query)) for n, s in description_sources().items()}
+    jobs["wikipedia"] = lambda: wikipedia.search(query, PER_SOURCE)
+    with ThreadPoolExecutor(len(jobs)) as ex:
+        found = dict(zip(jobs, ex.map(lambda f: f(), jobs.values())))
     names = crop_names(crop)
-    pages = [{"site": next(s for s in SEARCH_SITES if s in h["url"]), "title": h["title"], "url": h["url"], "text": h["text"],
-              "mentions_crop": any(re.search(rf"\b{re.escape(n)}\b", h["text"].lower()) for n in names)} for h in hits]
-    return sorted(pages, key=lambda p: not p["mentions_crop"])[:keep]
+    per_source = [[{"source": n, "title": h["title"], "url": h["url"], "text": h["text"],
+                    "mentions_crop": any(re.search(rf"\b{re.escape(c)}\b", h["text"].lower()) for c in names)}
+                   for h in hits] for n, hits in found.items()]
+    turns = [p for rank in range(PER_SOURCE) for pages in per_source for p in pages[rank:rank + 1]]  # round robin
+    return sorted(turns, key=lambda p: not p["mentions_crop"])[:keep]

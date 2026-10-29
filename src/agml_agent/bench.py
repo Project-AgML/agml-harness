@@ -33,6 +33,7 @@ import argparse
 import asyncio
 import importlib.metadata
 import json
+import re
 import subprocess
 import threading
 import time
@@ -51,6 +52,11 @@ from agml_agent.common import cache
 from agml_agent.common.cache import RetrievalCache
 
 MAX_CANDIDATES = 4
+DATABASES = ("EPPO, UC IPM/APS, Bugwood, TNAU Agritech, APS lessons, PNW and Texas handbooks, NC State Extension, "
+             "ProMusa, PlantVillage, Feedipedia, Wikipedia, GBIF, iNaturalist, Catalogue of Life, EOL, USDA")
+# Leakage guard on every source's text: benchmark datasets are described on the web (dataset pages, papers, Wikipedia
+# articles); text about datasets or machine learning never reaches the model.
+LEAK = re.compile(r"\b(data ?sets?|machine learning|deep learning|neural networks?|computer vision)\b", re.I)
 
 RETRIEVE_SCHEMA = {
     "type": "function",
@@ -58,10 +64,11 @@ RETRIEVE_SCHEMA = {
         "name": "retrieve",
         "description": (
             "Look up crop diseases, pests, weed/plant species and produce-quality classes in external agricultural "
-            "databases (EPPO, UC IPM/APS, Bugwood, GBIF, USDA). Two ways to ask, usable together:\n"
-            "- description: what you see in the image (symptoms, damage, colours, shapes). Searches UC IPM and "
-            "Bugwood fact sheets and returns pages with matching features (diseases, pests, species, quality problems), "
-            "on this crop first, then on other hosts; their titles usually name what they describe.\n"
+            f"databases ({DATABASES}). Two ways to ask, usable together:\n"
+            "- description: what you see in the image (symptoms, damage, colours, shapes). Searches extension fact "
+            "sheets (UC IPM, Bugwood, TNAU Agritech, APS, PNW and Texas handbooks, NC State, ProMusa, PlantVillage) "
+            "and Wikipedia, and returns pages with matching features (diseases, pests, species, quality problems), on "
+            "this crop first, then on other hosts; their titles usually name what they describe.\n"
             "- candidates: up to 4 names to check. Returns reference text for each (taxonomy, hosts, symptoms, "
             "identification notes) to compare against the image. With a description too, each excerpt is narrowed to "
             "the parts matching it.\n"
@@ -109,7 +116,7 @@ CANDIDATES_SCHEMA = {
         "name": "retrieve",
         "description": (
             "Look up crop diseases, pests, weed/plant species and produce-quality classes by name in external "
-            "agricultural databases (EPPO, UC IPM/APS, Bugwood, GBIF, USDA). Give up to 4 candidate names, e.g. the "
+            f"agricultural databases ({DATABASES}). Give up to 4 candidate names, e.g. the "
             "causes you are considering; returns reference text for each (taxonomy, hosts, symptoms, identification "
             "notes) to compare against the image. Lookup is by name only: symptom descriptions find nothing. Every "
             "excerpt comes with its source URL."
@@ -179,23 +186,26 @@ def run_retrieve(description: str = "", candidates: list | None = None, crop: st
             found = list(ex.map(lambda c: _lookup(c, crop, task), cands))
         sections = []
         for c, res in zip(cands, found):
-            chunks = [f"[{src}] {focus(ch['excerpt_text'], description, PER_CHUNK_CHARS)} (source: {ch['source_url']})"
-                      for src, chs in res.items() for ch in chs]
+            res = {src: [ch for ch in chs if not LEAK.search(ch["excerpt_text"])] for src, chs in res.items()}
+            # sources take turns (first chunk of each, then second...), task-matching sources first
+            chunks = [f"[{src}] {focus(chs[i]['excerpt_text'], description, PER_CHUNK_CHARS)} (source: {chs[i]['source_url']})"
+                      for i in range(max(map(len, res.values()), default=0)) for src, chs in res.items() if i < len(chs)]
             body = _join(chunks, RESULT_CHARS // len(cands)) or (
                 f"No results found for {c['name']!r}. Try its scientific name or aliases, or another candidate.")
             sections.append(f"## {c['name']}\n{body}")
         return "\n\n".join(sections)
-    # "v3": pages cached while only pages naming the crop were kept are not reused
-    pages = _cached(["description-v3", description.strip().lower(), crop.lower(), task],
+    # "v4": pages cached before every description source and Wikipedia were searched are not reused
+    pages = _cached(["description-v4", description.strip().lower(), crop.lower(), task],
                     lambda: search_description(description, crop, task))
+    pages = [p for p in pages if not LEAK.search(p["text"])]
     if not pages:
-        return ("UC IPM and Bugwood returned no pages for this description. Check candidate names instead, or answer "
+        return ("No fact-sheet or Wikipedia pages matched this description. Check candidate names instead, or answer "
                 "from the image.")
     other = f" (does not mention {crop})" if crop else ""
     head = (f"Pages matching the description, those mentioning {crop} first; pages about other hosts can still show "
             "a similar problem, compare them with the image" if crop else "Pages matching the description")
     return (f"{head} (titles usually name what they describe):\n\n"
-            + _join([f"[{p['site']}] {p['title']}{'' if p.get('mentions_crop') else other}: "
+            + _join([f"[{p['source']}] {p['title']}{'' if p.get('mentions_crop') else other}: "
                      f"{focus(p['text'], description, PER_CHUNK_CHARS)} (source: {p['url']})"
                      for p in pages], RESULT_CHARS - len(NEXT_STEP)) + NEXT_STEP)
 

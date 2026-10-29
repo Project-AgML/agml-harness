@@ -35,6 +35,7 @@ import argparse
 import importlib
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from importlib.resources import files
 
 import yaml
@@ -96,36 +97,35 @@ def retrieve(
         scientific_name=scientific_name, aliases=aliases or [],
     )
 
-    results: dict[str, list[dict]] = {}
-    for name in requested:
+    def one(name: str) -> list[dict]:
         cfg = registry.get(name)
         if cfg is None:
             log.warning("unknown source %r — skipping (not in config/sources.yaml)", name)
-            continue
+            return []
         if cfg.get("status") != "active":
             log.warning("source %r is %s, not active — skipping", name, cfg.get("status"))
-            continue
+            return []
         if query.task and cfg["task"] and query.task not in cfg["task"]:
-            continue  # this source doesn't cover this task, not an error
+            return []  # this source doesn't cover this task, not an error
 
         cache_key = (name, class_name.strip().lower())
         if cache_key in _CACHE:
-            if _CACHE[cache_key]:
-                results[name] = _CACHE[cache_key]
-            continue
-
+            return _CACHE[cache_key]
         try:
             module = importlib.import_module(cfg["module"])
-            chunks = module.fetch(query)
+            chunks = module.fetch(query, **(cfg.get("args") or {}))
         except Exception as e:
             log.error("%s: %s", name, e)
-            continue
-
+            return []
         chunk_dicts = [c.to_dict() for c in chunks]
         if chunk_dicts:  # empties aren't cached: search backends fail transiently, so a later call may find it
             _CACHE[cache_key] = chunk_dicts
-            results[name] = chunk_dicts
+        return chunk_dicts
 
+    # Sources are independent (different sites and APIs): asked in parallel, results kept in config order.
+    with ThreadPoolExecutor(max(1, min(len(requested), 8))) as ex:
+        found = list(ex.map(one, requested))
+    results = {name: chunks for name, chunks in zip(requested, found) if chunks}
     return results
 
 
