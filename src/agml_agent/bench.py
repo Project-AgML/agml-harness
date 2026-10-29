@@ -59,8 +59,9 @@ RETRIEVE_SCHEMA = {
         "description": (
             "Look up crop diseases, pests, weed/plant species and produce-quality classes in external agricultural "
             "databases (EPPO, UC IPM/APS, Bugwood, GBIF, USDA). Two ways to ask, usable together:\n"
-            "- description: what you see in the image (symptoms, damage, colours, shapes). Searches UC IPM/APS and "
-            "Bugwood fact sheets and returns matching pages; their titles usually name candidate causes.\n"
+            "- description: what you see in the image (symptoms, damage, colours, shapes). Searches UC IPM and "
+            "Bugwood fact sheets and returns pages with matching features (diseases, pests, species, quality problems), "
+            "on this crop first, then on other hosts; their titles usually name what they describe.\n"
             "- candidates: up to 4 names to check. Returns reference text for each (taxonomy, hosts, symptoms, "
             "identification notes) to compare against the image. With a description too, each excerpt is narrowed to "
             "the parts matching it.\n"
@@ -89,7 +90,9 @@ RETRIEVE_SCHEMA = {
                         "required": ["name"],
                     },
                 },
-                "crop": {"type": "string", "description": "Host crop, e.g. 'coffee'."},
+                "crop": {"type": "string", "description": "Host crop, e.g. 'coffee'. Optional: added to the search, and "
+                         "pages mentioning it come first; pages about other hosts are still returned. To look up the "
+                         "crop itself, give it as a candidate with task 'species'."},
                 "task": {"type": "string", "enum": ["disease", "pest", "species", "quality"],
                          "description": "Kind of class; picks which databases are searched."},
             },
@@ -177,14 +180,18 @@ def run_retrieve(description: str = "", candidates: list | None = None, crop: st
                 f"No results found for {c['name']!r}. Try its scientific name or aliases, or another candidate.")
             sections.append(f"## {c['name']}\n{body}")
         return "\n\n".join(sections)
-    # "v2": pages cached before index pages were skipped are not reused
-    pages = _cached(["description-v2", description.strip().lower(), crop.lower(), task],
+    # "v3": pages cached while only pages naming the crop were kept are not reused
+    pages = _cached(["description-v3", description.strip().lower(), crop.lower(), task],
                     lambda: search_description(description, crop, task))
     if not pages:
-        return ("No pages matched this description. Try fewer, more specific symptom words, or give candidate names "
-                "to check, or answer from the image.")
-    return ("Pages matching the description (titles usually name the cause):\n\n"
-            + _join([f"[{p['site']}] {p['title']}: {focus(p['text'], description, PER_CHUNK_CHARS)} (source: {p['url']})"
+        return ("UC IPM and Bugwood returned no pages for this description. Check candidate names instead, or answer "
+                "from the image.")
+    other = f" (does not mention {crop})" if crop else ""
+    head = (f"Pages matching the description, those mentioning {crop} first; pages about other hosts can still show "
+            "a similar problem, compare them with the image" if crop else "Pages matching the description")
+    return (f"{head} (titles usually name what they describe):\n\n"
+            + _join([f"[{p['site']}] {p['title']}{'' if p.get('mentions_crop') else other}: "
+                     f"{focus(p['text'], description, PER_CHUNK_CHARS)} (source: {p['url']})"
                      for p in pages], RESULT_CHARS - len(NEXT_STEP)) + NEXT_STEP)
 
 

@@ -186,13 +186,17 @@ def test_description_search(monkeypatch, no_cache):
     import agml_agent.symptom_search as ss
     got = []
     monkeypatch.setattr(ss, "search_description", lambda d, c, t: got.append((d, c, t)) or [
-        {"site": "ipm.ucanr.edu", "title": "Bean Common Mosaic", "url": "https://ipm.ucanr.edu/bcm", "text": "Leaves pucker."}])
+        {"site": "ipm.ucanr.edu", "title": "Bean Common Mosaic", "url": "https://ipm.ucanr.edu/bcm", "text": "Leaves pucker.",
+         "mentions_crop": True},
+        {"site": "bugwood.org", "title": "Soybean mosaic", "url": "https://bugwood.org/smv", "text": "Leaves pucker.",
+         "mentions_crop": False}])
     out = bench.run_retrieve("puckered leaf", crop="bean", task="disease")
     assert got == [("puckered leaf", "bean", "disease")]
     assert "[ipm.ucanr.edu] Bean Common Mosaic: Leaves pucker. (source: https://ipm.ucanr.edu/bcm)" in out
+    assert "[bugwood.org] Soybean mosaic (does not mention bean): Leaves pucker." in out
     assert out.endswith(bench.NEXT_STEP) and "check the most likely causes" in out
     monkeypatch.setattr(ss, "search_description", lambda *a: [])
-    assert bench.run_retrieve("nothing").startswith("No pages matched")
+    assert bench.run_retrieve("nothing").startswith("UC IPM and Bugwood returned no pages")
 
 
 def test_description_search_skips_crop_index_pages(monkeypatch):
@@ -211,6 +215,25 @@ def test_description_search_skips_crop_index_pages(monkeypatch):
     monkeypatch.setattr(sc, "fetch_and_extract", lambda u: fetched.append(u) or "bean rust pustules")
     pages = ss.search_description("pustules", crop="bean")
     assert fetched == urls[1:] and [p["url"] for p in pages] == urls[1:]
+
+
+def test_description_search_keeps_other_hosts_after_the_crop(monkeypatch, no_cache):
+    import agml_agent.common.scrape as sc
+    import agml_agent.symptom_search as ss
+    pages = {"https://ipm.ucanr.edu/dry-beans/halo-blight/": "Halo blight of dry beans: water-soaked spots, yellow halos.",
+             "https://wiki.bugwood.org/Peanut_Diseases": "blocked",
+             "https://bugwood.org/peanut-leaf-spot": "Early leaf spot of peanut: brown spots with yellow halos."}
+
+    class FakeDDGS:
+        def text(self, q, **kw):
+            return [{"href": u, "title": u} for u in pages]
+
+    monkeypatch.setattr(sc, "DDGS", FakeDDGS)
+    monkeypatch.setattr(sc, "FETCH_SLEEP", 0)
+    monkeypatch.setattr(sc, "fetch_and_extract", lambda u: pages[u])
+    got = ss.search_description("spots with yellow halos", crop="groundnut")
+    assert [(p["url"], p["mentions_crop"]) for p in got] == [("https://bugwood.org/peanut-leaf-spot", True),
+                                                             ("https://ipm.ucanr.edu/dry-beans/halo-blight/", False)]
 
 
 def test_cache_persists_results_but_not_empties(monkeypatch, tmp_path):
@@ -270,3 +293,21 @@ def test_prefill_lookups():
              NS(task="detection", ag_task="disease", crop="bean", class_names=["blight"])]
     assert lookups(items) == [("bean rust", "bean", "disease"), ("Healthy", "bean", "disease"),
                               ("bean rust", "", "disease"), ("Healthy", "", "disease"), ("Swinecress", "", "species")]
+
+
+def test_search_asks_each_site_when_first_answer_is_all_skipped(monkeypatch, no_cache):
+    import agml_agent.common.scrape as sc
+    import agml_agent.symptom_search as ss
+    asked = []
+
+    class FakeDDGS:
+        def text(self, q, **kw):
+            asked.append(q)
+            return ([{"href": "https://wiki.bugwood.org/Rust", "title": "Rust"}] if " OR " in q
+                    else [{"href": "https://ipm.ucanr.edu/home-and-landscape/rust/", "title": "Rust"}] if "ucanr" in q else [])
+
+    monkeypatch.setattr(sc, "DDGS", FakeDDGS)
+    monkeypatch.setattr(sc, "FETCH_SLEEP", 0)
+    monkeypatch.setattr(sc, "fetch_and_extract", lambda u: "Rust: orange pustules.")
+    assert [p["url"] for p in ss.search_description("orange pustules")] == ["https://ipm.ucanr.edu/home-and-landscape/rust/"]
+    assert len(asked) == 2

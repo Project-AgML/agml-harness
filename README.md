@@ -118,7 +118,8 @@ uv run agml-agent-bench ... --run-dir runs/<run>                                
   URLs only, never images.
 - **The `retrieve` tool** takes a `description` of what the model sees and/or up to 4 `candidates` (name,
   scientific name, aliases), plus `crop` and `task`. A description searches UC IPM and Bugwood fact sheets
-  (site-restricted, never the open web) and returns pages whose titles name candidate causes; candidates are looked
+  (site-restricted, never the open web) and returns pages with matching features, those mentioning the crop first and
+  then pages about other hosts (the crop never filters pages out); candidates are looked
   up by name in every database (EPPO, UC IPM/APS, Bugwood, GBIF, USDA), with long excerpts narrowed to the
   sentences matching the description. `--retrieve-mode candidates` offers name checks only (no description
   search), to compare the two. Lookups are cached in `<out>/retrieve_cache.jsonl` across runs

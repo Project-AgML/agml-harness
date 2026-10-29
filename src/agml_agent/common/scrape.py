@@ -77,7 +77,15 @@ def search_and_extract(
     # nothing anywhere: try the combined query, then one site at a time, each across several engines.
     queries = [f"({' OR '.join(f'site:{s}' for s in sites)}) {query}"] if len(sites) > 1 else []
     queries += [f"site:{s} {query}" for s in sites]
-    hits = cached(["search", queries, max_results], lambda: _search(queries, max_results))
+    def usable(hits):
+        return [h for h in hits if (u := h.get("href")) and any(s in u for s in sites)
+                and not any(re.search(p, u) for p in skip_url_patterns or [])]
+
+    hits = usable(cached(["search", queries, max_results], lambda: _search(queries, max_results)))
+    # The first query to answer can return only skipped pages (e.g. blocked wiki pages): then ask each site alone.
+    for q in queries[1:] if not hits and len(queries) > 1 else []:
+        if hits := usable(cached(["search", [q], max_results], lambda: _search([q], max_results))):
+            break
     if not hits:
         log.warning("no search results for %r on any site/engine — DDGS backends can be flaky/rate-limited at scale, "
                     "retry this class individually if it matters", query)
@@ -91,9 +99,7 @@ def search_and_extract(
     for hit in hits:
         if len(found) >= keep:
             break
-        url = hit.get("href")
-        if not url or not any(s in url for s in sites) or any(re.search(p, url) for p in skip_url_patterns or []):
-            continue
+        url = hit["href"]
         try:
             text = cached(["page", url], lambda: _fetch(url))
             if not text:
