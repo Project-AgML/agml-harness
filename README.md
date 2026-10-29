@@ -117,7 +117,7 @@ uv run agml-agent-bench ... --run-dir runs/<run>                                
   lists and benchmark results would leak labels. `retrieve` results reach the model as excerpt text and source
   URLs only, never images.
 - **The `retrieve` tool** takes a `description` of what the model sees and/or up to 4 `candidates` (name,
-  scientific name, aliases), plus `crop` and `task`. A description searches UC IPM and Bugwood fact sheets
+  scientific name, aliases), plus `crop` and `task` (both optional; they order results, they never filter: every database is searched). A description searches UC IPM and Bugwood fact sheets
   (site-restricted, never the open web) and returns pages with matching features, those mentioning the crop first and
   then pages about other hosts (the crop never filters pages out); candidates are looked
   up by name in every database (EPPO, UC IPM/APS, Bugwood, GBIF, USDA), with long excerpts narrowed to the

@@ -178,8 +178,20 @@ def test_candidates_are_looked_up_by_name(monkeypatch, no_cache):
                                                          {"name": "early blight", "aliases": ["Alternaria"]}], "tomato", "disease")
     assert out.index("## late blight") < out.index("## early blight")
     assert f"[ucipm_aps] {text} (source: https://ipm/late blight)" in out  # short excerpts are kept whole
-    assert ("late blight", {"crop": "tomato", "task": "disease", "scientific_name": "Phytophthora infestans", "aliases": []}) in seen
-    assert ("early blight", {"crop": "tomato", "task": "disease", "scientific_name": None, "aliases": ["Alternaria"]}) in seen
+    assert ("late blight", {"crop": "tomato", "scientific_name": "Phytophthora infestans", "aliases": []}) in seen
+    assert ("early blight", {"crop": "tomato", "scientific_name": None, "aliases": ["Alternaria"]}) in seen
+
+
+def test_every_database_is_searched_task_only_orders(monkeypatch, no_cache):
+    import agml_agent.retrieve as r
+    seen = []
+    monkeypatch.setattr(r, "retrieve", lambda name, **k: seen.append(k) or {
+        "gbif": [{"excerpt_text": "Puccinia, a rust fungus.", "source_url": "https://gbif.org/1"}],
+        "eppo": [{"excerpt_text": "Puccinia graminis, stem rust of wheat.", "source_url": "https://eppo.int/1"}]})
+    out = bench.run_retrieve(candidates=["stem rust"], crop="wheat", task="disease")
+    assert "task" not in seen[0] and out.index("[eppo]") < out.index("[gbif]")
+    out = bench.run_retrieve(candidates=["stem rust"], task="species")
+    assert out.index("[gbif]") < out.index("[eppo]")
 
 
 def test_description_search(monkeypatch, no_cache):

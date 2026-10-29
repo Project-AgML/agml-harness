@@ -94,7 +94,8 @@ RETRIEVE_SCHEMA = {
                          "pages mentioning it come first; pages about other hosts are still returned. To look up the "
                          "crop itself, give it as a candidate with task 'species'."},
                 "task": {"type": "string", "enum": ["disease", "pest", "species", "quality"],
-                         "description": "Kind of class; picks which databases are searched."},
+                         "description": "Kind of class. Every database is searched; the ones covering this "
+                                        "kind come first."},
             },
         },
     },
@@ -141,11 +142,15 @@ def _cached(key: list, fetch):
 
 
 def _lookup(c: dict, crop: str, task: str) -> dict:
-    from agml_agent.retrieve import retrieve
+    """Every database is searched whatever the task, so a wrong guess about the kind of class misses nothing; the
+    databases covering `task` come first (and get the result space first)."""
+    from agml_agent.retrieve import _load_sources, retrieve
 
     name, sci, aliases = c["name"], c.get("scientific_name") or None, c.get("aliases") or []
-    return _cached(["name", name.strip().lower(), sci, aliases, crop.lower(), task],
-                   lambda: retrieve(name, crop=crop, task=task, scientific_name=sci, aliases=aliases))
+    found = _cached(["name-all", name.strip().lower(), sci, aliases, crop.lower()],
+                    lambda: retrieve(name, crop=crop, scientific_name=sci, aliases=aliases))
+    covers = {src: cfg.get("task") or [] for src, cfg in _load_sources().items()}
+    return dict(sorted(found.items(), key=lambda kv: task not in covers.get(kv[0], [])))
 
 
 def _join(parts: list[str], limit: int) -> str:
