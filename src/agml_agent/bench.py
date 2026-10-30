@@ -48,7 +48,7 @@ from dotenv import load_dotenv
 from agbench.eval import Benchmark, EvalItem, Prediction, VLMMethod
 from agbench.eval.client import encode_image
 
-from agml_agent.common import cache
+from agml_agent.common import cache, scrape
 from agml_agent.common.cache import RetrievalCache
 
 MAX_CANDIDATES = 4
@@ -266,7 +266,7 @@ class HarnessMethod(VLMMethod):
         return {**super().config(), "name": self.name, "harness": "exploit", "tools": self.tools,
                 "max_tool_calls": self.max_tool_calls, "retrieve_mode": self.retrieve_mode, "agml_agent": importlib.metadata.version("agml-agent"),
                 "agml_agent_git": _git_sha(Path(__file__).parent), "agbench_commit": _agbench_commit(),
-                "retrieve_cache": str(cache.CACHE.path) if cache.CACHE else None}
+                "retrieve_cache": str(cache.CACHE.path) if cache.CACHE else None, "live_search": scrape.LIVE_SEARCH}
 
     async def _create(self, **kw):
         err = None
@@ -392,6 +392,7 @@ def run(args: argparse.Namespace) -> Path:
 
     load_dotenv()
     cache.CACHE = None if args.no_retrieve_cache else RetrievalCache(args.retrieve_cache or args.out / "retrieve_cache.jsonl")
+    scrape.LIVE_SEARCH = not args.no_live_search
     bench = Benchmark(args.data_dir, args.task or None, args.format or None, args.only, args.limit_per_dataset, args.seed)
     print(f"{len(bench.items)} items; {len(bench.skipped)} datasets skipped")
     spec = model_spec(args.model)
@@ -444,6 +445,9 @@ def main() -> None:
     p.add_argument("--judge-endpoint")
     p.add_argument("--retrieve-cache", type=Path, help="Lookup cache shared across runs (default: <out>/retrieve_cache.jsonl).")
     p.add_argument("--no-retrieve-cache", action="store_true", help="Always look up live.")
+    p.add_argument("--no-live-search", action="store_true",
+                   help="Web searches (fact-sheet sites) come only from the cache; API sources still look up live. "
+                        "Lookups made this way lack fact-sheet pages, so give the run its own --retrieve-cache copy.")
     run(p.parse_args())
 
 

@@ -86,7 +86,7 @@ def _args(data_dir, tmp_path, endpoint, **kw):
     a = dict(data_dir=data_dir, model="google/gemma-4-12B-it", endpoint=endpoint, tools=["retrieve"], max_tool_calls=4,
              task=None, format=["mcqa_within"], only="tomato", limit_per_dataset=None, concurrency=4, thinking=True,
              reasoning_effort="low", max_tokens=None, max_model_len=None, seed=0, out=tmp_path / "runs", run_dir=None,
-             judge=False, judge_endpoint=None, retrieve_cache=None, no_retrieve_cache=False,
+             judge=False, judge_endpoint=None, retrieve_cache=None, no_retrieve_cache=False, no_live_search=False,
              retrieve_mode="description+candidates")
     return argparse.Namespace(**{**a, **kw})
 
@@ -343,3 +343,24 @@ def test_dataset_text_never_reaches_the_model_and_sources_take_turns(monkeypatch
     out = bench.run_retrieve(candidates=["rust"], task="disease")
     assert "dataset" not in out and "[plantvillage]" not in out
     assert out.index("https://ipm/1") < out.index("https://wiki/1") < out.index("https://ipm/2")
+
+
+def test_no_live_search_uses_only_cached_searches(monkeypatch, tmp_path):
+    import agml_agent.common.scrape as sc
+    from agml_agent.sources import ucipm_aps
+    from agml_agent.sources.base import ClassQuery
+    searched = []
+
+    class FakeDDGS:
+        def text(self, q, **kw):
+            searched.append(q)
+            return [{"href": "https://ipm.ucanr.edu/bean-rust", "title": "Bean rust"}]
+
+    monkeypatch.setattr(sc, "DDGS", FakeDDGS)
+    monkeypatch.setattr(sc, "FETCH_SLEEP", 0)
+    monkeypatch.setattr(sc, "fetch_and_extract", lambda u: "Bean rust, Uromyces appendiculatus.")
+    monkeypatch.setattr(cache, "CACHE", cache.RetrievalCache(tmp_path / "c.jsonl"))
+    ucipm_aps.fetch(ClassQuery("bean rust", "bean"))
+    monkeypatch.setattr(sc, "LIVE_SEARCH", False)
+    assert ucipm_aps.fetch(ClassQuery("bean rust", "bean"))  # cached search still answers
+    assert ucipm_aps.fetch(ClassQuery("bean blight", "bean")) == [] and len(searched) == 1

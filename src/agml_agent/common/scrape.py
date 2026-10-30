@@ -30,6 +30,9 @@ SEARCHES = threading.Semaphore(2)
 SEARCH_INTERVAL = 1.0
 _pace_lock, _last_request = threading.Lock(), [0.0]
 STATS = Counter()  # live searches and how many found nothing; read by bench_prefill to tell if search works here
+# False: a search missing from the cache finds nothing instead of asking the engines (pages still fetch live).
+# For runs where web search is rate-limited; the API sources are unaffected.
+LIVE_SEARCH = True
 
 
 def fetch_and_extract(url: str) -> str | None:
@@ -134,6 +137,9 @@ def _pace() -> None:
 
 
 def _search(queries: list[str], max_results: int) -> list[dict]:
+    if not LIVE_SEARCH:
+        STATS["not_cached"] += 1
+        return []
     with SEARCHES:
         return _search_live(queries, max_results)
 
