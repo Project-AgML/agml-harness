@@ -23,7 +23,12 @@ log = logging.getLogger(__name__)
 
 FETCH_SLEEP = 1.0
 BACKENDS = ["auto", "yahoo", "google", "brave"]  # ddgs 9.x engines; "auto" picks among them itself
-SEARCHES = threading.Semaphore(4)  # concurrent web searches across all sources and lookups: the engines rate-limit
+# The engines rate-limit by request rate: the cache fill (2 concurrent, ~0.25 searches/s) got 0.5% empty, the first
+# all-sources pilot (4 concurrent, unpaced) got most searches empty. So: at most 2 searches at a time, and engine
+# requests at least SEARCH_INTERVAL apart across all threads.
+SEARCHES = threading.Semaphore(2)
+SEARCH_INTERVAL = 1.0
+_pace_lock, _last_request = threading.Lock(), [0.0]
 STATS = Counter()  # live searches and how many found nothing; read by bench_prefill to tell if search works here
 
 
@@ -120,6 +125,14 @@ def search_and_extract(
     return found
 
 
+def _pace() -> None:
+    with _pace_lock:
+        wait = _last_request[0] + SEARCH_INTERVAL - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _last_request[0] = time.monotonic()
+
+
 def _search(queries: list[str], max_results: int) -> list[dict]:
     with SEARCHES:
         return _search_live(queries, max_results)
@@ -129,6 +142,7 @@ def _search_live(queries: list[str], max_results: int) -> list[dict]:
     STATS["searches"] += 1
     for q in queries:
         for backend in BACKENDS:
+            _pace()
             try:
                 hits = list(DDGS().text(q, max_results=max_results, backend=backend))
             except Exception as e:
