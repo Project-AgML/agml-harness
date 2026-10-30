@@ -144,6 +144,19 @@ def test_candidates_mode_offers_no_description_search(data_dir, tmp_path, fake_s
     assert cfg["retrieve_mode"] == "candidates" and cfg["name"] == "google/gemma-4-12B-it + tools (candidates)"
 
 
+def test_crosscheck_mode_needs_description_and_candidates(data_dir, tmp_path, fake_server, monkeypatch):
+    endpoint, calls = fake_server
+    rd = bench.run(_args(data_dir, tmp_path, endpoint, retrieve_mode="crosscheck", limit_per_dataset=1))
+    params = FakeVLLM.requests[0]["tools"][0]["function"]["parameters"]
+    assert params["required"] == ["description", "candidates"] and "crop" in params["properties"]
+    assert calls[0] == ARGS
+    monkeypatch.setitem(globals(), "ARGS", {"description": "dark lesions"})  # no initial diagnosis: not looked up
+    calls.clear()
+    rd = bench.run(_args(data_dir, tmp_path, endpoint, retrieve_mode="crosscheck", limit_per_dataset=1, out=tmp_path / "runs2"))
+    t = json.loads((rd / "traces.jsonl").read_text().splitlines()[0])
+    assert not calls and t["trace"][1]["result"].startswith("error: give both")
+
+
 def test_agml_tools_are_not_allowed():
     with pytest.raises(ValueError, match="search_agml"):
         bench.HarnessMethod("http://127.0.0.1:1", "google/gemma-4-12B-it", tools=["retrieve", "search_agml"])

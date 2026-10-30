@@ -125,7 +125,8 @@ uv run agml-agent-bench ... --run-dir runs/<run>                                
   features, those mentioning the crop first and then pages about other hosts, sources taking turns; candidates are looked
   up by name in every database, with long excerpts narrowed to the
   sentences matching the description. `--retrieve-mode candidates` offers name checks only (no description
-  search), to compare the two. Lookups are cached in `<out>/retrieve_cache.jsonl` across runs
+  search), to compare the two. `--retrieve-mode crosscheck` follows a grower's diagnosis: every call gives a
+  description of the photo and an initial diagnosis (up to 4 candidates) to cross-check; no description search. Lookups are cached in `<out>/retrieve_cache.jsonl` across runs
   (`--retrieve-cache`, `--no-retrieve-cache`), so repeated classes are fast and every model sees the same text.
 - **Budget:** `max_tokens` (agbench's) caps completion tokens summed over all turns; tool results count only
   toward the context window.

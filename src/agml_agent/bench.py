@@ -128,7 +128,34 @@ CANDIDATES_SCHEMA = {
         },
     },
 }
-RETRIEVE_MODES = {"description+candidates": RETRIEVE_SCHEMA, "candidates": CANDIDATES_SCHEMA}
+# --retrieve-mode crosscheck: the grower's flow. Describe the photo, make an initial diagnosis (up to 4), cross-check it
+# against the databases, decide. Both are required; the description narrows each excerpt to what was seen. API pilot
+# (2026-10-30): name checks with a description fixed 9 / broke 2 of 60 items; description search alone did not help.
+CROSSCHECK_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "retrieve",
+        "description": (
+            "Cross-check your initial diagnosis against external agricultural databases "
+            f"({DATABASES}). Give a description of what you see and up to 4 candidates: the diseases, pests, species "
+            "or quality classes you are considering (the answer options, if you are given options). Returns reference "
+            "text for each candidate (appearance, symptoms, hosts, taxonomy), narrowed to the parts matching your "
+            "description, to compare against the image before you decide. Every excerpt comes with its source URL."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                **RETRIEVE_SCHEMA["function"]["parameters"]["properties"],
+                "description": {"type": "string", "description": "What you see in 2-4 sentences: plant part, colours, "
+                                "shapes, texture, pattern and spread of any symptoms or damage, e.g. 'Bean leaf with many "
+                                "small reddish-brown powdery pustules on the underside, each surrounded by a yellow halo; "
+                                "older leaves are most affected.'"},
+            },
+            "required": ["description", "candidates"],
+        },
+    },
+}
+RETRIEVE_MODES = {"description+candidates": RETRIEVE_SCHEMA, "candidates": CANDIDATES_SCHEMA, "crosscheck": CROSSCHECK_SCHEMA}
 
 PER_CHUNK_CHARS = 1200
 # After a description search. Pilot 2: the model answered with the first page's cause and never checked it, and a
@@ -285,6 +312,10 @@ class HarnessMethod(VLMMethod):
             args = json.loads(raw_args or "{}")
             if name == "retrieve" and self.retrieve_mode == "candidates":
                 args.pop("description", None)  # not offered in this mode
+            if name == "retrieve" and self.retrieve_mode == "crosscheck" and not (args.get("description") and args.get("candidates")):
+                result = ("error: give both a description of what you see and candidates (your initial diagnosis, up "
+                          "to 4 names) to cross-check.")
+                return result, time.perf_counter() - t0
             result = await asyncio.to_thread(BENCH_TOOLS[name][1], **args) if name in self.tools else f"error: unknown tool {name!r}"
         except Exception as e:  # bad JSON or arguments, source failures
             result = f"error: {type(e).__name__}: {e}"
