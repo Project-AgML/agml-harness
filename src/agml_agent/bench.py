@@ -169,8 +169,44 @@ CROSSCHECK_HEALTHY_SCHEMA = {
 }
 RESULT_NOTE = (f"\n\nThis text describes each candidate, not this plant. {NO_PROBLEM_NOTE} Compare it with the image, and "
                "keep only what the image shows.")
+# --retrieve-mode crosscheck-placebo: the same tool with no reference text and no lookups, to separate what asking for a
+# diagnosis does from what the databases add.
+PLACEBO_RESULT = f"No reference text was found for these candidates. {NO_PROBLEM_NOTE} Decide from the image."
+# --retrieve-mode crosscheck-assess: first say whether anything is wrong. Traces of crosscheck-healthy (2026-11-01): on
+# healthy plants the description already reported symptoms before any result, and candidates were all problems.
+NO_PROBLEM_SEEN = "no problem seen"
+ASSESSMENTS = [NO_PROBLEM_SEEN, "problem seen", "not a health question"]
+NOTHING_TO_CHECK = "No candidates to check. Decide from the image."
+CROSSCHECK_ASSESS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "retrieve",
+        "description": (
+            "Cross-check your view of the image against external agricultural databases "
+            f"({DATABASES}). First decide whether anything is actually wrong: veins, surface texture and a few small "
+            "marks can be normal. Then describe what you see and, unless you see no problem, give up to 4 candidates: "
+            "the diseases, pests, species or quality classes you are considering (the answer options, if you are given "
+            "options). Returns reference text for each candidate (appearance, symptoms, hosts, taxonomy), narrowed to "
+            f"the parts matching your description, to compare against the image before you decide. {NO_PROBLEM_NOTE} "
+            "Every excerpt comes with its source URL."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "assessment": {"type": "string", "enum": ASSESSMENTS,
+                               "description": "Whether the plant looks healthy or something is wrong."},
+                **CROSSCHECK_SCHEMA["function"]["parameters"]["properties"],
+                "description": {"type": "string", "description": "What you see in 2-4 sentences: plant part, colours, "
+                                "shapes, texture and any marks or damage, e.g. 'Bean leaf, evenly green with prominent "
+                                "veins and a slightly uneven surface; no spots or lesions.'"},
+            },
+            "required": ["assessment", "description"],
+        },
+    },
+}
 RETRIEVE_MODES = {"description+candidates": RETRIEVE_SCHEMA, "candidates": CANDIDATES_SCHEMA, "crosscheck": CROSSCHECK_SCHEMA,
-                  "crosscheck-healthy": CROSSCHECK_HEALTHY_SCHEMA}
+                  "crosscheck-healthy": CROSSCHECK_HEALTHY_SCHEMA, "crosscheck-placebo": CROSSCHECK_HEALTHY_SCHEMA,
+                  "crosscheck-assess": CROSSCHECK_ASSESS_SCHEMA}
 
 PER_CHUNK_CHARS = 1200
 # After a description search. Pilot 2: the model answered with the first page's cause and never checked it, and a
@@ -327,12 +363,21 @@ class HarnessMethod(VLMMethod):
             args = json.loads(raw_args or "{}")
             if name == "retrieve" and self.retrieve_mode == "candidates":
                 args.pop("description", None)  # not offered in this mode
-            if name == "retrieve" and self.retrieve_mode.startswith("crosscheck") and not (args.get("description") and args.get("candidates")):
+            if name == "retrieve" and self.retrieve_mode == "crosscheck-assess":
+                assessment = args.pop("assessment", None)
+                if assessment not in ASSESSMENTS or not args.get("description"):
+                    return f"error: give an assessment (one of {ASSESSMENTS}) and a description of what you see.", time.perf_counter() - t0
+                if not args.get("candidates"):
+                    result = NOTHING_TO_CHECK if assessment == NO_PROBLEM_SEEN else "error: give candidates (up to 4 names) to cross-check."
+                    return result, time.perf_counter() - t0
+            elif name == "retrieve" and self.retrieve_mode.startswith("crosscheck") and not (args.get("description") and args.get("candidates")):
                 result = ("error: give both a description of what you see and candidates (your initial diagnosis, up "
                           "to 4 names) to cross-check.")
                 return result, time.perf_counter() - t0
+            if name == "retrieve" and self.retrieve_mode == "crosscheck-placebo":
+                return PLACEBO_RESULT, time.perf_counter() - t0
             result = await asyncio.to_thread(BENCH_TOOLS[name][1], **args) if name in self.tools else f"error: unknown tool {name!r}"
-            if name in self.tools and self.retrieve_mode == "crosscheck-healthy":
+            if name in self.tools and self.retrieve_mode in ("crosscheck-healthy", "crosscheck-assess"):
                 result += RESULT_NOTE
         except Exception as e:  # bad JSON or arguments, source failures
             result = f"error: {type(e).__name__}: {e}"

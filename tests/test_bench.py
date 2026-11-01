@@ -166,6 +166,30 @@ def test_crosscheck_healthy_mode_says_nothing_may_be_wrong(data_dir, tmp_path, f
     assert calls[0] == ARGS and t["trace"][1]["result"].endswith(bench.RESULT_NOTE)
 
 
+def test_crosscheck_placebo_mode_looks_nothing_up(data_dir, tmp_path, fake_server):
+    endpoint, calls = fake_server
+    rd = bench.run(_args(data_dir, tmp_path, endpoint, retrieve_mode="crosscheck-placebo", limit_per_dataset=1))
+    t = json.loads((rd / "traces.jsonl").read_text().splitlines()[0])
+    assert not calls and t["trace"][1]["result"] == bench.PLACEBO_RESULT
+
+
+@pytest.mark.parametrize("args,looked_up,result", [
+    ({"assessment": "problem seen", **ARGS}, True, bench.RESULT_NOTE),
+    ({"assessment": "no problem seen", "description": "evenly green leaf"}, False, bench.NOTHING_TO_CHECK),
+    ({"assessment": "problem seen", "description": "dark lesions"}, False, "error: give candidates (up to 4 names) to cross-check."),
+    (ARGS, False, "error: give an assessment"),
+])
+def test_crosscheck_assess_mode(data_dir, tmp_path, fake_server, monkeypatch, args, looked_up, result):
+    endpoint, calls = fake_server
+    monkeypatch.setitem(globals(), "ARGS", args)
+    rd = bench.run(_args(data_dir, tmp_path, endpoint, retrieve_mode="crosscheck-assess", limit_per_dataset=1))
+    params = FakeVLLM.requests[0]["tools"][0]["function"]["parameters"]
+    assert list(params["properties"])[0] == "assessment" and params["required"] == ["assessment", "description"]
+    got = json.loads((rd / "traces.jsonl").read_text().splitlines()[0])["trace"][1]["result"]
+    assert result in got and bool(calls) == looked_up
+    assert not calls or "assessment" not in calls[0]  # the assessment is not a lookup argument
+
+
 def test_agml_tools_are_not_allowed():
     with pytest.raises(ValueError, match="search_agml"):
         bench.HarnessMethod("http://127.0.0.1:1", "google/gemma-4-12B-it", tools=["retrieve", "search_agml"])
