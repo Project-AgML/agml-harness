@@ -157,6 +157,15 @@ def test_crosscheck_mode_needs_description_and_candidates(data_dir, tmp_path, fa
     assert not calls and t["trace"][1]["result"].startswith("error: give both")
 
 
+def test_crosscheck_healthy_mode_says_nothing_may_be_wrong(data_dir, tmp_path, fake_server):
+    endpoint, calls = fake_server
+    rd = bench.run(_args(data_dir, tmp_path, endpoint, retrieve_mode="crosscheck-healthy", limit_per_dataset=1))
+    tool = FakeVLLM.requests[0]["tools"][0]["function"]
+    assert bench.NO_PROBLEM_NOTE in tool["description"] and tool["parameters"]["required"] == ["description", "candidates"]
+    t = json.loads((rd / "traces.jsonl").read_text().splitlines()[0])
+    assert calls[0] == ARGS and t["trace"][1]["result"].endswith(bench.RESULT_NOTE)
+
+
 def test_agml_tools_are_not_allowed():
     with pytest.raises(ValueError, match="search_agml"):
         bench.HarnessMethod("http://127.0.0.1:1", "google/gemma-4-12B-it", tools=["retrieve", "search_agml"])

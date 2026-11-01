@@ -155,7 +155,22 @@ CROSSCHECK_SCHEMA = {
         },
     },
 }
-RETRIEVE_MODES = {"description+candidates": RETRIEVE_SCHEMA, "candidates": CANDIDATES_SCHEMA, "crosscheck": CROSSCHECK_SCHEMA}
+# --retrieve-mode crosscheck-healthy: crosscheck, plus the reminder that nothing may be wrong. Repeats (2026-10-31): on
+# open-ended items with a healthy plant crosscheck fell from 69% to 36%; candidates almost never included "healthy", so
+# the model compared problems only and picked one. Tool description and result only: agbench's prompt is unchanged.
+NO_PROBLEM_NOTE = ("The plant may be healthy with no problem, or none of the candidates may fit: reference text is returned "
+                   "whether or not the plant has the candidate.")
+CROSSCHECK_HEALTHY_SCHEMA = {
+    "type": "function",
+    "function": {
+        **CROSSCHECK_SCHEMA["function"],
+        "description": f"{CROSSCHECK_SCHEMA['function']['description']} {NO_PROBLEM_NOTE}",
+    },
+}
+RESULT_NOTE = (f"\n\nThis text describes each candidate, not this plant. {NO_PROBLEM_NOTE} Compare it with the image, and "
+               "keep only what the image shows.")
+RETRIEVE_MODES = {"description+candidates": RETRIEVE_SCHEMA, "candidates": CANDIDATES_SCHEMA, "crosscheck": CROSSCHECK_SCHEMA,
+                  "crosscheck-healthy": CROSSCHECK_HEALTHY_SCHEMA}
 
 PER_CHUNK_CHARS = 1200
 # After a description search. Pilot 2: the model answered with the first page's cause and never checked it, and a
@@ -312,11 +327,13 @@ class HarnessMethod(VLMMethod):
             args = json.loads(raw_args or "{}")
             if name == "retrieve" and self.retrieve_mode == "candidates":
                 args.pop("description", None)  # not offered in this mode
-            if name == "retrieve" and self.retrieve_mode == "crosscheck" and not (args.get("description") and args.get("candidates")):
+            if name == "retrieve" and self.retrieve_mode.startswith("crosscheck") and not (args.get("description") and args.get("candidates")):
                 result = ("error: give both a description of what you see and candidates (your initial diagnosis, up "
                           "to 4 names) to cross-check.")
                 return result, time.perf_counter() - t0
             result = await asyncio.to_thread(BENCH_TOOLS[name][1], **args) if name in self.tools else f"error: unknown tool {name!r}"
+            if name in self.tools and self.retrieve_mode == "crosscheck-healthy":
+                result += RESULT_NOTE
         except Exception as e:  # bad JSON or arguments, source failures
             result = f"error: {type(e).__name__}: {e}"
         return result, time.perf_counter() - t0
