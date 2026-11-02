@@ -206,7 +206,13 @@ CROSSCHECK_ASSESS_SCHEMA = {
 }
 RETRIEVE_MODES = {"description+candidates": RETRIEVE_SCHEMA, "candidates": CANDIDATES_SCHEMA, "crosscheck": CROSSCHECK_SCHEMA,
                   "crosscheck-healthy": CROSSCHECK_HEALTHY_SCHEMA, "crosscheck-placebo": CROSSCHECK_HEALTHY_SCHEMA,
-                  "crosscheck-assess": CROSSCHECK_ASSESS_SCHEMA}
+                  "crosscheck-assess": CROSSCHECK_ASSESS_SCHEMA, "crosscheck-look-first": CROSSCHECK_HEALTHY_SCHEMA}
+# --retrieve-mode crosscheck-look-first: answer with no tool offered, then see that answer and may cross-check it. Placebo
+# (2026-11-01): healthy plants lost as much with no reference text, and detection fell with no calls, so the damage starts
+# when the tool is offered. Detection and segmentation stop at the first answer. If the check ends without a complete
+# answer (token budget, server error), the first answer stands.
+LOOK_ONLY_TASKS = {"detection", "segmentation"}
+CHECK_PROMPT = "That is your first answer. You may cross-check it, then give your final answer in the format asked."
 
 PER_CHUNK_CHARS = 1200
 # After a description search. Pilot 2: the model answered with the first page's cause and never checked it, and a
@@ -377,7 +383,7 @@ class HarnessMethod(VLMMethod):
             if name == "retrieve" and self.retrieve_mode == "crosscheck-placebo":
                 return PLACEBO_RESULT, time.perf_counter() - t0
             result = await asyncio.to_thread(BENCH_TOOLS[name][1], **args) if name in self.tools else f"error: unknown tool {name!r}"
-            if name in self.tools and self.retrieve_mode in ("crosscheck-healthy", "crosscheck-assess"):
+            if name in self.tools and self.retrieve_mode in ("crosscheck-healthy", "crosscheck-assess", "crosscheck-look-first"):
                 result += RESULT_NOTE
         except Exception as e:  # bad JSON or arguments, source failures
             result = f"error: {type(e).__name__}: {e}"
@@ -396,14 +402,16 @@ class HarnessMethod(VLMMethod):
         trace, n_calls, tool_s, used = [], 0, 0.0, []
         prompt_tokens = completion_tokens = 0
         text, finish, err, t0 = "", "stop", None, time.perf_counter()
-        for _ in range(self.max_tool_calls + 2):
+        look_first = self.retrieve_mode == "crosscheck-look-first"
+        looking, first_answer = look_first, None
+        for _ in range(self.max_tool_calls + 2 + look_first):
             remaining = self.max_tokens - completion_tokens
             if remaining <= 0:
                 finish = "length"
                 break
+            offer = {} if looking else {"tools": schemas, "tool_choice": "auto" if n_calls < self.max_tool_calls else "none"}
             r, err = await self._create(model=model, messages=messages, max_tokens=remaining, temperature=temperature,
-                                        tools=schemas, tool_choice="auto" if n_calls < self.max_tool_calls else "none",
-                                        extra_body=body or None)
+                                        extra_body=body or None, **offer)
             if r is None:
                 finish = "error"
                 break
@@ -415,6 +423,13 @@ class HarnessMethod(VLMMethod):
             text = msg.content or ""
             trace.append({"role": "assistant", "reasoning": reasoning, "text": text,
                           "tool_calls": [{"name": c.function.name, "arguments": _loads(c.function.arguments)} for c in calls]})
+            if looking:
+                looking = False
+                if finish != "stop" or not text or item.task in LOOK_ONLY_TASKS:
+                    break
+                first_answer = text
+                messages += [{"role": "assistant", "content": text}, {"role": "user", "content": CHECK_PROMPT}]
+                continue
             if not calls:
                 break
             messages.append({"role": "assistant", "content": text,
@@ -432,9 +447,13 @@ class HarnessMethod(VLMMethod):
                 messages.append({"role": "tool", "tool_call_id": c.id, "name": c.function.name, "content": result})
 
         latency = time.perf_counter() - t0
+        checked_finish, kept_first = finish, first_answer is not None and (finish != "stop" or not text)
+        if kept_first:
+            text, finish = first_answer, "stop"
         await self._write_trace({"item_id": item.item_id, "dataset": item.dataset, "n_tool_calls": n_calls,
                                  "tools_used": used, "tool_s": round(tool_s, 3), "turns": sum(s["role"] == "assistant" for s in trace),
-                                 "finish_reason": finish, "error": err, "trace": trace})
+                                 "finish_reason": checked_finish, "error": err, "first_answer": first_answer, "kept_first": kept_first,
+                                 "trace": trace})
         reasoning_all = "\n\n".join(
             s["reasoning"] + "".join(f"\n[called {c['name']}({json.dumps(c['arguments'], ensure_ascii=False)})]" for c in s["tool_calls"])
             for s in trace if s["role"] == "assistant").strip()

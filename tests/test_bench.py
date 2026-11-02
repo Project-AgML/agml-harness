@@ -190,6 +190,36 @@ def test_crosscheck_assess_mode(data_dir, tmp_path, fake_server, monkeypatch, ar
     assert not calls or "assessment" not in calls[0]  # the assessment is not a lookup argument
 
 
+def test_crosscheck_look_first_answers_before_the_tool_is_offered(data_dir, tmp_path, fake_server):
+    endpoint, calls = fake_server
+    rd = bench.run(_args(data_dir, tmp_path, endpoint, retrieve_mode="crosscheck-look-first", limit_per_dataset=1, concurrency=1))
+    look, check = FakeVLLM.requests[:2]
+    assert "tools" not in look and "tool_choice" not in look
+    assert check["tools"][0]["function"]["description"] == bench.CROSSCHECK_HEALTHY_SCHEMA["function"]["description"]
+    assert check["messages"][-2] == {"role": "assistant", "content": "Late blight"}
+    assert check["messages"][-1] == {"role": "user", "content": bench.CHECK_PROMPT}
+    t = json.loads((rd / "traces.jsonl").read_text().splitlines()[0])
+    assert calls[0] == ARGS and t["first_answer"] == "Late blight" and not t["kept_first"] and t["n_tool_calls"] == 1
+    assert t["trace"][2]["result"].endswith(bench.RESULT_NOTE)
+
+
+def test_crosscheck_look_first_stops_at_the_first_answer_on_look_only_tasks(data_dir, tmp_path, fake_server, monkeypatch):
+    endpoint, calls = fake_server
+    monkeypatch.setattr(bench, "LOOK_ONLY_TASKS", {"classification"})
+    rd = bench.run(_args(data_dir, tmp_path, endpoint, retrieve_mode="crosscheck-look-first", limit_per_dataset=1))
+    assert not calls and all("tools" not in r for r in FakeVLLM.requests)
+    t = json.loads((rd / "traces.jsonl").read_text().splitlines()[0])
+    assert t["turns"] == 1 and t["first_answer"] is None and not t["kept_first"]
+
+
+def test_crosscheck_look_first_keeps_the_first_answer_if_the_budget_runs_out(data_dir, tmp_path, fake_server):
+    endpoint, calls = fake_server
+    rd = bench.run(_args(data_dir, tmp_path, endpoint, retrieve_mode="crosscheck-look-first", limit_per_dataset=1, max_tokens=5))
+    t = json.loads((rd / "traces.jsonl").read_text().splitlines()[0])
+    p = json.loads((rd / "predictions.jsonl").read_text().splitlines()[0])
+    assert t["kept_first"] and t["finish_reason"] == "length" and p["answer"] == "Late blight" and p["finish_reason"] == "stop"
+
+
 def test_agml_tools_are_not_allowed():
     with pytest.raises(ValueError, match="search_agml"):
         bench.HarnessMethod("http://127.0.0.1:1", "google/gemma-4-12B-it", tools=["retrieve", "search_agml"])
