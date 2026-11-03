@@ -203,6 +203,14 @@ def test_crosscheck_look_first_answers_before_the_tool_is_offered(data_dir, tmp_
     assert t["trace"][2]["result"].endswith(bench.RESULT_NOTE)
 
 
+def test_crosscheck_look_first_placebo_looks_first_and_looks_nothing_up(data_dir, tmp_path, fake_server):
+    endpoint, calls = fake_server
+    rd = bench.run(_args(data_dir, tmp_path, endpoint, retrieve_mode="crosscheck-look-first-placebo", limit_per_dataset=1))
+    assert "tools" not in FakeVLLM.requests[0] and FakeVLLM.requests[1]["messages"][-1]["content"] == bench.CHECK_PROMPT
+    t = json.loads((rd / "traces.jsonl").read_text().splitlines()[0])
+    assert not calls and t["first_answer"] == "Late blight" and t["trace"][2]["result"] == bench.PLACEBO_RESULT
+
+
 def test_crosscheck_look_first_stops_at_the_first_answer_on_look_only_tasks(data_dir, tmp_path, fake_server, monkeypatch):
     endpoint, calls = fake_server
     monkeypatch.setattr(bench, "LOOK_ONLY_TASKS", {"classification"})

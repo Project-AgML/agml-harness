@@ -206,7 +206,9 @@ CROSSCHECK_ASSESS_SCHEMA = {
 }
 RETRIEVE_MODES = {"description+candidates": RETRIEVE_SCHEMA, "candidates": CANDIDATES_SCHEMA, "crosscheck": CROSSCHECK_SCHEMA,
                   "crosscheck-healthy": CROSSCHECK_HEALTHY_SCHEMA, "crosscheck-placebo": CROSSCHECK_HEALTHY_SCHEMA,
-                  "crosscheck-assess": CROSSCHECK_ASSESS_SCHEMA, "crosscheck-look-first": CROSSCHECK_HEALTHY_SCHEMA}
+                  "crosscheck-assess": CROSSCHECK_ASSESS_SCHEMA, "crosscheck-look-first": CROSSCHECK_HEALTHY_SCHEMA,
+                  "crosscheck-look-first-placebo": CROSSCHECK_HEALTHY_SCHEMA}
+PLACEBO_MODES = {"crosscheck-placebo", "crosscheck-look-first-placebo"}
 # --retrieve-mode crosscheck-look-first: answer with no tool offered, then see that answer and may cross-check it. Placebo
 # (2026-11-01): healthy plants lost as much with no reference text, and detection fell with no calls, so the damage starts
 # when the tool is offered. Detection and segmentation stop at the first answer. If the check ends without a complete
@@ -380,7 +382,7 @@ class HarnessMethod(VLMMethod):
                 result = ("error: give both a description of what you see and candidates (your initial diagnosis, up "
                           "to 4 names) to cross-check.")
                 return result, time.perf_counter() - t0
-            if name == "retrieve" and self.retrieve_mode == "crosscheck-placebo":
+            if name == "retrieve" and self.retrieve_mode in PLACEBO_MODES:
                 return PLACEBO_RESULT, time.perf_counter() - t0
             result = await asyncio.to_thread(BENCH_TOOLS[name][1], **args) if name in self.tools else f"error: unknown tool {name!r}"
             if name in self.tools and self.retrieve_mode in ("crosscheck-healthy", "crosscheck-assess", "crosscheck-look-first"):
@@ -402,7 +404,7 @@ class HarnessMethod(VLMMethod):
         trace, n_calls, tool_s, used = [], 0, 0.0, []
         prompt_tokens = completion_tokens = 0
         text, finish, err, t0 = "", "stop", None, time.perf_counter()
-        look_first = self.retrieve_mode == "crosscheck-look-first"
+        look_first = self.retrieve_mode.startswith("crosscheck-look-first")
         looking, first_answer = look_first, None
         for _ in range(self.max_tool_calls + 2 + look_first):
             remaining = self.max_tokens - completion_tokens
