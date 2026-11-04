@@ -23,7 +23,9 @@ from pathlib import Path
 
 # Runs before results were labelled by source name labelled description pages by site.
 OLD_LABELS = {"ipm.ucanr.edu": "ucipm_aps", "bugwood.org": "bugwood"}
-BLOCK = re.compile(r"^\[([a-z_.]+)\] ?(.*?)(?=^\[[a-z_.]+\] |^## |\Z)", re.M | re.S)
+# "[names: eppo, gbif]" (--clean-text 2) is one block labelled "names".
+BLOCK = re.compile(r"^\[([a-z_.]+)(?::[^\]\n]*)?\] ?(.*?)(?=^\[[a-z_.]+(?::[^\]\n]*)?\] |^## |\Z)", re.M | re.S)
+SECTION = re.compile(r"^## (.+?)\n(.*?)(?=^## |\Z)", re.M | re.S)
 
 
 def _shingles(text: str, n: int = 4) -> set[tuple]:
@@ -34,18 +36,32 @@ def _shingles(text: str, n: int = 4) -> set[tuple]:
 def _source_names() -> set[str]:
     from agml_agent.retrieve import _load_sources
 
-    return set(_load_sources()) | set(OLD_LABELS)
+    return set(_load_sources()) | set(OLD_LABELS) | {"local_kb", "names"}
+
+
+def _turns(trace: list, i: int) -> tuple[set, set, str]:
+    """Shingles of the model's text before and after step i, and the later text itself (lower case)."""
+    text = lambda ts: " ".join((t.get("reasoning") or "") + " " + (t.get("text") or "") + " " + json.dumps(
+        [c.get("arguments") for c in t.get("tool_calls") or []]) for t in ts if t.get("role") == "assistant")
+    later = text(trace[i + 1:])
+    return _shingles(text(trace[:i])), _shingles(later), later.lower()
+
+
+def _uses(body: str, earlier: set, later: set) -> bool:
+    """The later text repeats at least two 4-word phrases from `body` that the model had not written before the result
+    (its description and first answer are not evidence of use, and reference text is narrowed to match them)."""
+    return len((_shingles(body) & later) - earlier) >= 2
 
 
 def source_use(trace: list | None) -> tuple[list[str], list[str]]:
     """(sources shown, sources used) in one item's trace. Shown: the source's text was in a tool result. Used: the
-    model's later reasoning or answer repeats a 4-word phrase from that text (at least 2), or a page title from it."""
+    model's later reasoning or answer repeats two 4-word phrases from that text that it had not written before, or a
+    page title from it."""
     shown, used, known = [], [], _source_names()
     for i, s in enumerate(trace or []):
         if s.get("role") != "tool":
             continue
-        later = " ".join((t.get("reasoning") or "") + " " + (t.get("text") or "") for t in trace[i + 1:] if t.get("role") == "assistant")
-        later_sh, later_low = _shingles(later), later.lower()
+        earlier_sh, later_sh, later_low = _turns(trace, i)
         for m in BLOCK.finditer(str(s.get("result", ""))):
             if m.group(1) not in known:  # a bracketed word inside page text, not a source label
                 continue
@@ -53,9 +69,66 @@ def source_use(trace: list | None) -> tuple[list[str], list[str]]:
             body = re.sub(r"\(source: [^)]*\)", "", body)
             title = body.split(":", 1)[0].strip().lower() if ":" in body[:150] else ""
             shown.append(src)
-            if len(_shingles(body) & later_sh) >= 2 or (len(title) > 12 and title in later_low):
+            if _uses(body, earlier_sh, later_sh) or (len(title) > 12 and title in later_low):
                 used.append(src)
     return sorted(set(shown)), sorted(set(used))
+
+
+def _norm(s: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9 ]", " ", str(s).lower().replace("_", " ")).split())
+
+
+def kb_sections(trace: list | None, answer: str = "") -> list[dict]:
+    """One row per knowledge-base section shown to the model: the candidate it was looked up for, the crop given, the
+    page title and heading, and checks of relevance (title or heading names the candidate; the crop is named; the
+    heading is about appearance; the candidate is the correct class) and use (as in source_use)."""
+    from agml_agent.kb import kind_of
+
+    rows, gt = [], _norm(answer)
+    for i, s in enumerate(trace or []):
+        if s.get("role") != "tool" or "[local_kb]" not in str(s.get("result", "")):
+            continue
+        args = next((c.get("arguments") for c in reversed(trace[i - 1].get("tool_calls") or [])), {}) if i else {}
+        crop = (args or {}).get("crop") or "" if isinstance(args, dict) else ""
+        earlier_sh, later_sh, _ = _turns(trace, i)
+        for sec in SECTION.finditer(str(s["result"])):
+            cand = sec.group(1).strip()
+            for m in BLOCK.finditer(sec.group(2)):
+                if m.group(1) != "local_kb":
+                    continue
+                body = re.sub(r"\(source: ([^)]*)\)", "", m.group(2)).strip()
+                url = (re.search(r"\(source: ([^)]*)\)", m.group(2)) or [None, ""])[1]
+                head, _, text = body.partition(": ")
+                title, _, heading = head.partition(" > ")
+                c, low = _norm(cand), _norm(head)
+                page = _norm(re.sub(r"\|.*$", "", title))  # title without "| NC State Extension Publications"
+                rows.append({"candidate": cand, "crop": crop, "title": title, "heading": heading, "text": text, "url": url,
+                             "names candidate": bool(c) and c in low,
+                             "page is the candidate": bool(c) and (page == c or page.startswith(c + " ") and len(page) <= len(c) + 25
+                                                                   and not re.search(r"\b(moth|beetle|weevil|borer|mite|aphid)\b", page[len(c):])),
+                             "names crop": bool(crop) and _norm(crop) in _norm(body),
+                             "appearance section": kind_of(heading) == "symptom",
+                             "correct class": bool(c and gt) and (c == gt or (len(gt) > 3 and gt in c) or (len(c) > 3 and c in gt)),
+                             "used": _uses(body, earlier_sh, later_sh)})
+    return rows
+
+
+def kb_summary(p) -> dict:
+    """Knowledge-base relevance and use over one run's frame (rows of predictions with `trace` and `gt`)."""
+    import pandas as pd
+
+    rows = [dict(r, item_id=i, score=sc) for i, t, gt, sc in zip(p["item_id"], p["trace"], p["gt"], p["score"])
+            for r in kb_sections(t, str(gt))]
+    calls = sum(1 for t in p.trace for s in (t or []) if s.get("role") == "tool")
+    k = pd.DataFrame(rows)
+    out = {"tool results": calls, "with knowledge-base text": int(k.item_id.nunique()) if len(k) else 0,
+           "sections shown": len(k)}
+    if len(k):
+        for col in ("names candidate", "page is the candidate", "appearance section", "names crop", "correct class", "used"):
+            out[f"{col} (%)"] = round(k[col].mean() * 100, 1)
+        cc = k[k["correct class"]]
+        out["used, correct class (%)"] = round(cc.used.mean() * 100, 1) if len(cc) else None
+    return out, k
 
 
 def main() -> None:
@@ -214,6 +287,48 @@ def app() -> None:
                       if (m := g.sources_used.map(lambda xs, s=src: s in xs)).any()]
                 st.dataframe(pd.DataFrame(by), hide_index=True, width="stretch")
 
+    def page_kb():
+        st.title("Knowledge base")
+        st.caption("Each section the local knowledge base returned for a candidate. Names candidate: the page title or "
+                   "heading contains the candidate's name. Page is the candidate: the page is about exactly it (not "
+                   "'Banana Moth' for 'banana'). Names crop: the crop given in the call appears in the section. "
+                   "Appearance section: the heading is about symptoms, damage, identification or description. Correct "
+                   "class: the candidate is the item's answer. Used: the model's later reasoning or answer repeats two "
+                   "4-word phrases from the section that it had not written before the result.")
+        runs_kb = [r for r in harness if frame(r["dir"]).trace.map(lambda t: "[local_kb]" in json.dumps(t)).any()]
+        if not runs_kb:
+            st.info("No run here showed knowledge-base text (run with --kb).")
+            return
+        summ = []
+        for r in runs_kb:
+            o, _ = kb_summary(frame(r["dir"]))
+            summ.append({"run": f"{r['name']} · {Path(r['dir']).name}", **o})
+        st.dataframe(pd.DataFrame(summ), hide_index=True, width="stretch")
+        st.markdown("**Use by source** (share of items where a source was shown and then used)")
+        rows = []
+        for r in harness:
+            p = frame(r["dir"])
+            if "sources_shown" not in p:
+                continue
+            for src in sorted({x for xs in p.sources_shown for x in xs}):
+                shown = p.sources_shown.map(lambda xs: src in xs)
+                used = p.sources_used.map(lambda xs: src in xs)
+                rows.append({"run": Path(r["dir"]).name, "source": src, "items shown": int(shown.sum()),
+                             "used (%)": round(used[shown].mean() * 100, 1)})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        names = {f"{r['name']} · {Path(r['dir']).name}": r["dir"] for r in runs_kb}
+        c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
+        _, k = kb_summary(frame(names[c1.selectbox("Run", list(names))]))
+        filt = {c: c2.selectbox(c, ["all", "yes", "no"], key=c) if i == 0 else (c3 if i == 1 else c4).selectbox(c, ["all", "yes", "no"], key=c)
+                for i, c in enumerate(["page is the candidate", "correct class", "used"])}
+        for c, f in filt.items():
+            if f != "all":
+                k = k[k[c] == (f == "yes")]
+        st.caption(f"{len(k)} sections")
+        st.dataframe(k[["item_id", "candidate", "crop", "title", "heading", "names candidate", "page is the candidate",
+                        "names crop", "appearance section", "correct class", "used", "text", "url"]],
+                     hide_index=True, width="stretch", height=600)
+
     def show_trace(trace: list):
         step = 0
         for s in trace:
@@ -293,7 +408,7 @@ def app() -> None:
                             show_trace(r["trace"])
 
     st.navigation([st.Page(page_usage, title="Tool use", default=True), st.Page(page_sources, title="Sources"),
-                   st.Page(page_traces, title="Traces")]).run()
+                   st.Page(page_kb, title="Knowledge base"), st.Page(page_traces, title="Traces")]).run()
 
 
 if __name__ == "__main__":

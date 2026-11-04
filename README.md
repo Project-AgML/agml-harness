@@ -198,6 +198,11 @@ Tool use and traces in the harness viewer (`agml-agent-view`, Streamlit, http://
 uv run agml-agent-view --runs runs/<harness run> --baseline <baseline run> --data-dir /path
 ```
 
+- **Knowledge base:** every section the local knowledge base returned, with relevance checks (the page title or
+  heading names the candidate; the page is about exactly the candidate; the crop is named; the heading is about
+  appearance; the candidate is the correct class) and use (the model's later reasoning or answer repeats two 4-word
+  phrases from it that it had not written before); per run, the share of each, and per source, how often its text is
+  used. Filter the sections by these checks to read examples.
 - **Tool use:** how often each tool was called, overall and per task; per baseline, which items the tools fixed and
   which they broke.
 - **Sources:** per source, the items where its text was shown to the model and where the model used it (repeated a

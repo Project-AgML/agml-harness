@@ -60,3 +60,17 @@ def test_options_are_looked_up_first_then_own_candidates():
                              ["Bean Rust", "Anthracnose", "Mosaic", "None of the above", "I don't know"])
     assert [c["name"] for c in got] == ["bean rust", "Anthracnose", "Mosaic", "angular leaf spot"]
     assert got[0]["scientific_name"] == "Uromyces"  # the model's details for an option are kept
+
+
+def test_viewer_checks_relevance_and_use_of_kb_sections():
+    from agml_agent import bench_view
+    trace = [{"role": "assistant", "reasoning": "dark spots", "text": "",
+              "tool_calls": [{"name": "retrieve", "arguments": {"description": "dark spots", "crop": "coffee"}}]},
+             {"role": "tool", "result": "## coffee leaf rust\n[local_kb] Coffee Leaf Rust > Symptoms: orange powdery "
+                                        "pustules on the underside of coffee leaves (source: https://x)\n\n[names: eppo] "
+                                        "Preferred name: Hemileia vastatrix (source: https://e)"},
+             {"role": "assistant", "reasoning": "I see orange powdery pustules on the underside of the leaves", "text": "rust"}]
+    rows = bench_view.kb_sections(trace, "Coffee leaf rust")
+    assert len(rows) == 1 and rows[0]["page is the candidate"] and rows[0]["appearance section"] and rows[0]["names crop"]
+    assert rows[0]["correct class"] and rows[0]["used"]
+    assert bench_view.source_use(trace) == (["local_kb", "names"], ["local_kb"])

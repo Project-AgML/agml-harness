@@ -54,6 +54,9 @@ KINDS = [("symptom", re.compile(r"symptom|signs?\b|identif|damage|descri|appeara
 NOT_NAMES = re.compile(r"^(healthy|normal|fresh|good|bad|ripe|unripe|rotten|damaged|other|none|unknown)\b", re.I)
 # Site navigation that text extraction keeps on small pages (UC IPM photo pages): such sections are dropped.
 NAVIGATION = re.compile(r"Notifications\s+Loading|Manage Pests\s+Home|Skip to (main )?content", re.I)
+# Headings of sections that are not about the subject: reference lists, credits, publication details.
+NOT_CONTENT = re.compile(r"^(references?|literature cited|bibliography|citations?|sources?|further reading|"
+                         r"acknowledg|authors?|publication|resources|for more information|contacts?)\b", re.I)
 SECTION_CHARS = 1500  # long sections are split at paragraph breaks into parts of about this size
 MIN_SECTION_CHARS = 80
 
@@ -309,11 +312,12 @@ class KB:
             except sqlite3.OperationalError:
                 continue
             low = term.lower()
-            rows = [r for r in rows if r[2].count("|") < 8]  # tables: lists of names, not descriptions
+            rows = [r for r in rows if r[2].count("|") < 8 and not NOT_CONTENT.match(r[1].strip())]  # tables, references
             named = [r for r in rows if low in (r[0] + " " + r[1]).lower()]
             # without a title or heading naming it, the exact term must be in the text (stemming matches "Thumbe" to
-            # "thumb")
-            rows = named or [r for r in rows if low in r[2].lower()]
+            # "thumb") and so must the crop: passing mentions elsewhere were mostly off topic (2026-11-04: "bruised" ->
+            # Jimsonweed, "Leaf Rot" -> spinach watering, "pink disease" -> a forage grass)
+            rows = named or [r for r in rows if low in r[2].lower() and crop and crop.lower() in r[2].lower()]
             on_crop = self._pages_mentioning({r[4] for r in rows}, crop)
             rows.sort(key=lambda r: (low not in r[0].lower(), r[4] not in on_crop, r[5] != "symptom", r[6]))
             for title, heading, text, site, url, kind, score in rows:
