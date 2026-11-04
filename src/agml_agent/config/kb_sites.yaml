@@ -14,7 +14,7 @@ sites:
     start: [https://ipm.ucanr.edu/agriculture/, https://ipm.ucanr.edu/home-and-landscape/]
     allow: '^https://ipm\.ucanr\.edu/(agriculture|home-and-landscape|PMG)/'
     deny: '\?|/PDF/|/PUB/|/(weather|calludt|DS_|WATER)/'
-    max_pages: 6000
+    max_pages: 30000   # 6,000 was reached on the first crawl (2026-11-03)
 
   - name: ncsu_extension
     robots: https://content.ces.ncsu.edu/robots.txt
