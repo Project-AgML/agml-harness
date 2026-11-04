@@ -53,7 +53,7 @@ KINDS = [("symptom", re.compile(r"symptom|signs?\b|identif|damage|descri|appeara
 # Names that describe no organism: looking them up finds sections that only mention the word ("Healthy flowers...").
 NOT_NAMES = re.compile(r"^(healthy|normal|fresh|good|bad|ripe|unripe|rotten|damaged|other|none|unknown)\b", re.I)
 # Site navigation that text extraction keeps on small pages (UC IPM photo pages): such sections are dropped.
-NAVIGATION = re.compile(r"Notifications Loading|Manage Pests Home|Skip to (main )?content", re.I)
+NAVIGATION = re.compile(r"Notifications\s+Loading|Manage Pests\s+Home|Skip to (main )?content", re.I)
 SECTION_CHARS = 1500  # long sections are split at paragraph breaks into parts of about this size
 MIN_SECTION_CHARS = 80
 
