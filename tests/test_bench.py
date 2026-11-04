@@ -86,7 +86,7 @@ def _args(data_dir, tmp_path, endpoint, **kw):
     a = dict(data_dir=data_dir, model="google/gemma-4-12B-it", endpoint=endpoint, tools=["retrieve"], max_tool_calls=4,
              task=None, format=["mcqa_within"], only="tomato", limit_per_dataset=None, concurrency=4, thinking=True,
              reasoning_effort="low", max_tokens=None, max_model_len=None, seed=0, out=tmp_path / "runs", run_dir=None,
-             judge=False, judge_endpoint=None, retrieve_cache=None, no_retrieve_cache=False, no_live_search=False, clean_text=False,
+             judge=False, judge_endpoint=None, retrieve_cache=None, no_retrieve_cache=False, no_live_search=False, clean_text=False, check_options=False, kb=None,
              retrieve_mode="description+candidates")
     return argparse.Namespace(**{**a, **kw})
 

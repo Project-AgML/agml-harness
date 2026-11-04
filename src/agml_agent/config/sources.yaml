@@ -122,7 +122,7 @@ sources:
     access: scrape
     verified: true    # Plant Disease Lessons / Plant Health Instructor: free, unlike APS journals
     license: "APS Education Center — public pages; attribute source_url"
-    status: active
+    status: paused   # robots.txt blocks ClaudeBot and other AI crawlers (2026-11-03)
 
   - name: pnw_handbooks
     module: agml_agent.sources.factsheets
@@ -132,7 +132,7 @@ sources:
     access: scrape
     verified: true    # host -> disease pages (cause, symptoms); also insect and weed handbooks
     license: "Pacific Northwest Handbooks — public pages; attribute source_url"
-    status: active
+    status: paused   # robots.txt blocks ClaudeBot and other AI crawlers (2026-11-03)
 
   - name: texas_pdh
     module: agml_agent.sources.factsheets
@@ -162,7 +162,7 @@ sources:
     access: scrape
     verified: true    # banana only
     license: "ProMusa — public pages; attribute source_url"
-    status: active
+    status: paused   # robots.txt blocks ClaudeBot and other AI crawlers (2026-11-03)
 
   - name: plantvillage
     module: agml_agent.sources.factsheets
@@ -172,7 +172,7 @@ sources:
     access: scrape
     verified: true    # info pages only; AgML has a PlantVillage *dataset* — the bench leakage filter drops pages about datasets
     license: "PlantVillage — public pages; attribute source_url"
-    status: active
+    status: paused   # robots.txt blocks ClaudeBot and other AI crawlers (2026-11-03)
 
   - name: feedipedia
     module: agml_agent.sources.factsheets

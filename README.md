@@ -120,18 +120,64 @@ uv run agml-agent-bench ... --run-dir runs/<run>                                
   lists and benchmark results would leak labels. Text about datasets or machine learning is dropped from every source. `retrieve` results reach the model as excerpt text and source
   URLs only, never images.
 - **The `retrieve` tool** takes a `description` of what the model sees and/or up to 4 `candidates` (name,
-  scientific name, aliases), plus `crop` and `task` (both optional; they order results, they never filter: every database is searched). A description searches the fact-sheet sites (UC IPM, Bugwood, TNAU, APS lessons, PNW and Texas handbooks,
-  NC State, ProMusa, PlantVillage; site-restricted, never the open web) and Wikipedia, and returns pages with matching
-  features, those mentioning the crop first and then pages about other hosts, sources taking turns; candidates are looked
-  up by name in every database, with long excerpts narrowed to the
-  sentences matching the description. `--retrieve-mode candidates` offers name checks only (no description
-  search), to compare the two. `--retrieve-mode crosscheck` follows a grower's diagnosis: every call gives a
-  description of the photo and an initial diagnosis (up to 4 candidates) to cross-check; no description search. `--retrieve-mode crosscheck-healthy` also reminds the model, in the tool description and result, that the plant may have no problem. `--retrieve-mode crosscheck-placebo` is the same tool with no reference text and no lookups, to separate what asking for a diagnosis does from what the databases add. `--retrieve-mode crosscheck-assess` first asks whether anything is wrong; candidates are not needed if nothing is. `--retrieve-mode crosscheck-look-first` answers with no tool offered, then shows the model that answer and offers the cross-check (classification and image-text items; detection and segmentation stop at the first answer). `--clean-text` orders each candidate's reference text appearance first, then identification, then taxonomy (text on the crop first) and drops disambiguation pages, site boilerplate, Wikipedia pages naming no living thing, and USDA grades unless the task is quality. A lookup keeps the sources that answer within 15 s. `crosscheck-look-first-placebo` is the same flow with no reference text. Lookups are cached in `<out>/retrieve_cache.jsonl` across runs
-  (`--retrieve-cache`, `--no-retrieve-cache`), so repeated classes are fast and every model sees the same text.
+  scientific name, aliases), plus `crop` and `task` (both optional; they order results, they never filter: every
+  database is searched). Candidates are looked up by name in every database, with long excerpts narrowed to the
+  sentences matching the description. A description alone searches fact-sheet sites (site-restricted, never the open
+  web) and Wikipedia. Lookups are cached in `<out>/retrieve_cache.jsonl` across runs (`--retrieve-cache`,
+  `--no-retrieve-cache`), so repeated classes are fast and every model sees the same text. A lookup keeps the sources
+  that answer within 15 s.
+- **Modes** (`--retrieve-mode`):
+  - `description+candidates` (default), `candidates` (name checks only);
+  - `crosscheck`: every call gives a description of the photo and an initial diagnosis (up to 4 candidates);
+  - `crosscheck-healthy`: also reminds the model, in the tool description and result, that the plant may have no problem;
+  - `crosscheck-assess`: first says whether anything is wrong; candidates are not needed if nothing is;
+  - `crosscheck-look-first`: answers with no tool offered, then sees that answer and may cross-check it
+    (classification and image-text items; detection and segmentation stop at the first answer);
+  - `crosscheck-placebo`, `crosscheck-look-first-placebo`: the same flows with no reference text and no lookups, to
+    separate what the process does from what the databases add.
+- **Reference text options:**
+  - `--clean-text 1`: appearance text first, then identification, then taxonomy (text on the crop first); drops
+    disambiguation pages, site boilerplate, Wikipedia pages naming no living thing, and USDA grades unless the task
+    is quality. `--clean-text 2` also shows Wikipedia's appearance sections (Symptoms, Description...) and shrinks
+    taxonomy to name lines (scientific name, common names, synonyms).
+  - `--check-options`: on multiple choice, every answer option is looked up, then the model's own candidates (up to 6).
+  - `--kb DIR`: also search the local knowledge base (below); its sections come first.
+  - Pages from sites whose robots.txt blocks AI crawlers (PlantVillage, PNW Handbooks, APS, ProMusa) are never shown,
+    even from the cache.
 - **Budget:** `max_tokens` (agbench's) caps completion tokens summed over all turns; tool results count only
   toward the context window.
 - **Output:** a standard agbench run dir plus `traces.jsonl` (every model turn, tool call, arguments, result and
   latency per item).
+
+### Local knowledge base
+
+Extension fact sheets describe what a problem looks like crop by crop, but most sites have no search API and web
+search is rate-limited. `agml-agent-kb` downloads them once, splits each page into sections and indexes them with
+SQLite full-text search, so lookups take milliseconds and every run sees the same text:
+
+```bash
+uv run agml-agent-kb --kb kb crawl                  # download (hours: robots.txt crawl delays); resumable
+uv run agml-agent-kb --kb kb crawl --site ucipm --max-pages 50
+uv run agml-agent-kb --kb kb build                  # extract sections, write docs.jsonl.gz, kb.sqlite, manifest.json
+uv run agml-agent-kb --kb kb search downy mildew --crop cucumber
+uv run agml-agent-bench ... --kb kb                 # use it in a benchmark run
+```
+
+- **Sites** (`config/kb_sites.yaml`): UC IPM, NC State Extension, Texas Plant Disease Handbook, Feedipedia. Only
+  sites whose robots.txt allows us; PlantVillage, PNW Handbooks, APS and ProMusa block AI crawlers and are left out.
+  The crawler obeys robots.txt and Crawl-delay (at least 1 s between requests per site) and downloads HTML only (no
+  images, no PDFs).
+- **Layout:** `raw/<site>/pages.jsonl` (every request) and `raw/<site>/html/<sha1>.html.gz` (pages as downloaded, so
+  extraction can be redone without re-crawling); `docs.jsonl.gz` (one section per line: site, url, title, heading,
+  kind, text); `kb.sqlite` (FTS5 index, BM25); `manifest.json` (counts, build date).
+- **Sections:** split at the page's headings, long ones at paragraph breaks (about 1,500 characters); `kind` from the
+  heading (symptom, life_cycle, management, other); repeated blocks (navigation) dropped; pages about datasets or
+  machine learning dropped (leakage).
+- **Search:** a candidate's name (then scientific name, then aliases) as a phrase; matches in the title or heading
+  first, then appearance sections, then text mentioning the crop (ordering only), then BM25; at most 2 sections per
+  page.
+- **On farm:** build locally and copy the folder (`rsync -a kb/ farm:<repo>/kb/`); the compute nodes don't need
+  internet for it. `kb/` is git-ignored: the sites' text is for research use and is not redistributed.
 
 ### Viewing results
 

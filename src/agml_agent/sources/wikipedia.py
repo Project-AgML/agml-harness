@@ -45,6 +45,27 @@ def page(title: str) -> dict | None:
     return {"title": title, "url": f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}", "text": text[:MAX_CHARS]}
 
 
+SECTION = re.compile(r"\n(==+) ?(.+?) ?\1\n")
+APPEARANCE_HEADINGS = re.compile(r"symptom|sign|identif|descri|morpholog|appearance|damage|diagnos|characteristic", re.I)
+
+
+def appearance_text(title: str, crops: list[str], max_chars: int = MAX_CHARS) -> str | None:
+    """The article's opening paragraph, then its sections on appearance (Symptoms, Signs, Description, Identification,
+    Damage...), then sections mentioning one of `crops`, each with its heading; None if the article is missing or
+    about datasets/ML. The plain opening (page()) is often about causes and spread rather than what the problem
+    looks like (2026-11-03)."""
+    text = cached(["wikipedia", title], lambda: _extract(title))
+    if not text or LEAK.search(title) or LEAK.search(text):
+        return None
+    parts = SECTION.split("\n" + text)
+    intro, sections = parts[0].strip(), [(parts[i + 1].strip(), parts[i + 2].strip()) for i in range(1, len(parts) - 2, 3)]
+    sections = [(h, b) for h, b in sections if b]
+    looks = [(h, b) for h, b in sections if APPEARANCE_HEADINGS.search(h)]
+    on_crop = [(h, b) for h, b in sections if (h, b) not in looks and any(c in b.lower() for c in crops)]
+    out = [intro.split("\n")[0]] + [f"{h}: {b}" for h, b in looks + on_crop]
+    return "\n".join(x for x in out if x)[:max_chars]
+
+
 def search(text: str, n: int = 4) -> list[dict]:
     """Articles matching free text (a description), keeping only plant/pest/disease-like ones."""
     titles = cached(["wikipedia-search", text, n], lambda: _search(text, n))

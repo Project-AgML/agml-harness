@@ -230,10 +230,25 @@ LIVE_LOOKUPS = 12
 # lookup took ~15 s, set by Catalogue of Life (median 14 s, max 68 s) and GBIF (median 9 s), both taxonomy only.
 SOURCE_DEADLINE = 15
 _live = threading.Semaphore(LIVE_LOOKUPS)
-# --clean-text: what each candidate's reference text shows, and in what order (see _clean_parts).
-CLEAN_TEXT = False
+# Sites whose robots.txt blocks AI crawlers (checked 2026-11-03): their pages are never shown, even from the cache.
+BLOCKED = re.compile(r"plantvillage\.psu\.edu|pnwhandbooks\.org|apsnet\.org|promusa\.org", re.I)
+# --kb: the local knowledge base (kb.py), searched by candidate name next to the API sources; None when not used.
+KB_INDEX = None
+KB_TAGS = {"symptom": ["symptom", "identification"], "life_cycle": ["life_cycle"], "management": ["management"],
+           "other": ["identification"]}
+# --check-options: on multiple choice, every answer option is looked up, then the model's own candidates while there is
+# room. Look-first runs (2026-11-02): the model checked every option in 21% of calls and the correct one in 58%.
+CHECK_OPTIONS = False
+MAX_WITH_OPTIONS = 6
+NOT_OPTIONS = {"none of the above", "i don't know"}
+# --clean-text: what each candidate's reference text shows, and in what order (see _clean_parts). 0: as looked up;
+# 1: ordered and filtered; 2: also Wikipedia's appearance sections and taxonomy shrunk to name lines.
+CLEAN_TEXT = 0
 APPEARANCE_TAGS, IDENTIFICATION_TAGS = {"symptom", "damage"}, {"identification", "grade_defect"}
 DISAMBIGUATION = re.compile(r"\bmay (also )?refer to\b|\bmay mean\b|disambiguation", re.I)
+TAXONOMY_TAGS = {"taxonomy", "synonym", "distribution"}
+NAME_FIELD = re.compile(r"(Scientific name|Preferred name|Common names?|English common names|Synonyms)\s*:", re.I)
+NAME_CHARS = 300
 BOILERPLATE = re.compile(r"An official website of the United States government|^N/A \(or sometimes", re.I)
 # Wikipedia pages about the wrong thing ("rust" -> iron corrosion, carambola -> carbon nanotubes) name no living thing.
 BIOLOGY = re.compile(r"plant|leaf|leaves|crop|fung|bacteri|virus|insect|pest|disease|species|genus|famil|weed|fruit|"
@@ -255,8 +270,34 @@ def _lookup(c: dict, crop: str, task: str) -> dict:
     name, sci, aliases = c["name"], c.get("scientific_name") or None, c.get("aliases") or []
     found = _cached(["name-all", name.strip().lower(), sci, aliases, crop.lower()],
                     lambda: retrieve(name, crop=crop, scientific_name=sci, aliases=aliases, deadline=SOURCE_DEADLINE))
+    # cached lookups made before these sites were left out can still hold their pages
+    found = {src: kept for src, chs in found.items() if (kept := [ch for ch in chs if not BLOCKED.search(ch.get("source_url") or "")])}
+    if KB_INDEX is not None:
+        hits = KB_INDEX.search([name, sci, *aliases], crop)
+        if hits:
+            found = {"local_kb": [{"excerpt_text": f"{h['title']} > {h['heading']}: {h['text']}", "source_url": h["url"],
+                                   "tags": KB_TAGS[h["kind"]], "raw_response": json.dumps({"site": h["site"]})} for h in hits],
+                     **found}
     covers = {src: cfg.get("task") or [] for src, cfg in _load_sources().items()}
+    covers["local_kb"] = ["disease", "pest", "species", "quality"]
     return dict(sorted(found.items(), key=lambda kv: task not in covers.get(kv[0], [])))
+
+
+def with_options(candidates, options: list[str]) -> list:
+    """The answer options first (in their order, without 'None of the above' / 'I don't know'), then the model's
+    candidates that are not options, up to MAX_WITH_OPTIONS."""
+    opts = [o for o in options if o.strip().lower() not in NOT_OPTIONS]
+    own = [{"name": c} if isinstance(c, str) else c for c in candidates or []]
+    names = {o.strip().lower() for o in opts}
+    extra = [c for c in own if isinstance(c, dict) and c.get("name") and c["name"].strip().lower() not in names]
+    return ([next((c for c in own if isinstance(c, dict) and (c.get("name") or "").strip().lower() == o.strip().lower()), {"name": o})
+             for o in opts] + extra)[:MAX_WITH_OPTIONS]
+
+
+def _name_line(text: str) -> str:
+    """'Scientific name: ...; English common names: ...' from a taxonomy excerpt (lines or EPPO's '. '-joined fields)."""
+    fields = [f.strip() for f in re.split(r"\n|\.\s+(?=[A-Z][A-Za-z ]+:)", text)]
+    return "; ".join(f for f in fields if NAME_FIELD.match(f))[:NAME_CHARS]
 
 
 def _clean_parts(res: dict, crop: str, task: str, description: str) -> list[str]:
@@ -265,10 +306,11 @@ def _clean_parts(res: dict, crop: str, task: str, description: str) -> list[str]
     (symptoms, damage) first, then identification notes, then taxonomy; text mentioning the crop first within each;
     disambiguation pages, site boilerplate, Wikipedia pages naming no living thing, and USDA grades unless the task is
     quality (or not given) are dropped. Nothing is dropped for being about another host."""
+    from agml_agent.sources import wikipedia
     from agml_agent.symptom_search import crop_names, focus
 
     crops = crop_names(crop)
-    parts = []
+    parts, names = [], set()
     for turn, (src, chs) in enumerate(res.items()):
         for i, ch in enumerate(chs):
             text, tags = ch["excerpt_text"], set(ch.get("tags") or [])
@@ -276,6 +318,18 @@ def _clean_parts(res: dict, crop: str, task: str, description: str) -> list[str]
                     or (src == "wikipedia" and not BIOLOGY.search(text))):
                 continue
             if src == "usda_ams_grades" and task and task != "quality":
+                continue
+            if CLEAN_TEXT >= 2 and src == "wikipedia":  # the article's appearance sections, not only its opening
+                raw = _loads(ch.get("raw_response") or "{}")
+                title = raw.get("title") if isinstance(raw, dict) else None
+                text = (title and wikipedia.appearance_text(title, crops)) or text
+            if CLEAN_TEXT >= 2 and tags <= TAXONOMY_TAGS:
+                # taxonomy-only text shrinks to its name lines (scientific name, common names, synonyms): they map local
+                # and common names to the options; the lineage takes space from appearance text
+                line = _name_line(text)
+                if line and line.lower() not in names:
+                    names.add(line.lower())
+                    parts.append(((-1, False, i, turn), f"[{src}] {line} (source: {ch['source_url']})"))
                 continue
             kind = 0 if tags & APPEARANCE_TAGS else 1 if tags & IDENTIFICATION_TAGS else 2
             on_crop = any(c in text.lower() for c in crops)
@@ -297,12 +351,13 @@ def _join(parts: list[str], limit: int) -> str:
     return "\n\n".join(out)
 
 
-def run_retrieve(description: str = "", candidates: list | None = None, crop: str = "", task: str = "") -> str:
+def run_retrieve(description: str = "", candidates: list | None = None, crop: str = "", task: str = "",
+                 max_candidates: int = MAX_CANDIDATES) -> str:
     """The retrieve tool, reduced to what the model may see: excerpt text and source URL per chunk."""
     from agml_agent.symptom_search import focus, search_description
 
     cands = [{"name": c} if isinstance(c, str) else c for c in candidates or []]
-    cands = [c for c in cands if isinstance(c, dict) and c.get("name")][:MAX_CANDIDATES]
+    cands = [c for c in cands if isinstance(c, dict) and c.get("name")][:max_candidates]
     if not description and not cands:
         return "error: give a description of what you see and/or candidates (names) to check."
     if cands:
@@ -394,7 +449,8 @@ class HarnessMethod(VLMMethod):
                 "max_tool_calls": self.max_tool_calls, "retrieve_mode": self.retrieve_mode, "agml_agent": importlib.metadata.version("agml-agent"),
                 "agml_agent_git": _git_sha(Path(__file__).parent), "agbench_commit": _agbench_commit(),
                 "retrieve_cache": str(cache.CACHE.path) if cache.CACHE else None, "live_search": scrape.LIVE_SEARCH,
-                "clean_text": CLEAN_TEXT}
+                "clean_text": CLEAN_TEXT, "check_options": CHECK_OPTIONS,
+                "kb": str(KB_INDEX.path) if KB_INDEX is not None else None}
 
     async def _create(self, **kw):
         err = None
@@ -407,7 +463,7 @@ class HarnessMethod(VLMMethod):
                     await asyncio.sleep(2 ** attempt * 5)
         return None, err
 
-    async def _call_tool(self, name: str, raw_args: str) -> tuple[str, float]:
+    async def _call_tool(self, name: str, raw_args: str, options: list[str] = ()) -> tuple[str, float]:
         t0 = time.perf_counter()
         try:
             args = json.loads(raw_args or "{}")
@@ -426,6 +482,8 @@ class HarnessMethod(VLMMethod):
                 return result, time.perf_counter() - t0
             if name == "retrieve" and self.retrieve_mode in PLACEBO_MODES:
                 return PLACEBO_RESULT, time.perf_counter() - t0
+            if name == "retrieve" and CHECK_OPTIONS and options:
+                args["candidates"], args["max_candidates"] = with_options(args.get("candidates"), options), MAX_WITH_OPTIONS
             result = await asyncio.to_thread(BENCH_TOOLS[name][1], **args) if name in self.tools else f"error: unknown tool {name!r}"
             if name in self.tools and self.retrieve_mode in ("crosscheck-healthy", "crosscheck-assess", "crosscheck-look-first"):
                 result += RESULT_NOTE
@@ -482,7 +540,7 @@ class HarnessMethod(VLMMethod):
             for c in calls:
                 if n_calls < self.max_tool_calls:
                     n_calls += 1
-                    result, dt = await self._call_tool(c.function.name, c.function.arguments)
+                    result, dt = await self._call_tool(c.function.name, c.function.arguments, item.choices or [])
                     used.append(c.function.name)
                 else:
                     result, dt = "error: tool-call budget used up; answer now", 0.0
@@ -549,14 +607,17 @@ def run(args: argparse.Namespace) -> Path:
     load_dotenv()
     cache.CACHE = None if args.no_retrieve_cache else RetrievalCache(args.retrieve_cache or args.out / "retrieve_cache.jsonl")
     scrape.LIVE_SEARCH = not args.no_live_search
-    global CLEAN_TEXT
-    CLEAN_TEXT = args.clean_text
+    global CLEAN_TEXT, CHECK_OPTIONS, KB_INDEX
+    CLEAN_TEXT, CHECK_OPTIONS = args.clean_text, args.check_options
+    if args.kb:
+        from agml_agent.kb import KB
+        KB_INDEX = KB(args.kb)
     bench = Benchmark(args.data_dir, args.task or None, args.format or None, args.only, args.limit_per_dataset, args.seed)
     print(f"{len(bench.items)} items; {len(bench.skipped)} datasets skipped")
     spec = model_spec(args.model)
     conc = args.concurrency or (spec.get("parallel", 2) if spec["backend"] == "llamacpp" else spec["concurrency"])
     tag = ("tools" if args.retrieve_mode == "description+candidates" else f"tools-{args.retrieve_mode}") + (
-        "-clean" if args.clean_text else "")
+        {0: "", 1: "-clean", 2: "-clean2"}[args.clean_text] + ("-options" if args.check_options else "") + ("-kb" if args.kb else ""))
     rd = args.run_dir or args.out / f"{args.model.replace('/', '__')}__{tag}_{datetime.now():%Y%m%d-%H%M%S}"
     rd.mkdir(parents=True, exist_ok=True)
 
@@ -604,9 +665,13 @@ def main() -> None:
     p.add_argument("--judge-endpoint")
     p.add_argument("--retrieve-cache", type=Path, help="Lookup cache shared across runs (default: <out>/retrieve_cache.jsonl).")
     p.add_argument("--no-retrieve-cache", action="store_true", help="Always look up live.")
-    p.add_argument("--clean-text", action="store_true",
-                   help="Candidate reference text: appearance first, then identification, then taxonomy; text on the crop "
-                        "first; disambiguation pages, off-topic Wikipedia pages and off-task USDA grades dropped.")
+    p.add_argument("--clean-text", type=int, nargs="?", const=1, default=0, choices=[0, 1, 2],
+                   help="Candidate reference text. 1: appearance first, then identification, then taxonomy; text on the "
+                        "crop first; disambiguation pages, off-topic Wikipedia pages and off-task USDA grades dropped. "
+                        "2: also Wikipedia's appearance sections (Symptoms, Description...) and taxonomy as name lines."),
+    p.add_argument("--check-options", action="store_true",
+                   help=f"On multiple choice, look up every answer option, then the model's candidates (up to {MAX_WITH_OPTIONS}).")
+    p.add_argument("--kb", type=Path, help="Local knowledge base folder (agml-agent-kb), searched next to the API sources.")
     p.add_argument("--no-live-search", action="store_true",
                    help="Web searches (fact-sheet sites) come only from the cache; API sources still look up live. "
                         "Lookups made this way lack fact-sheet pages, so give the run its own --retrieve-cache copy.")

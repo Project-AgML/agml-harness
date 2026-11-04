@@ -1,0 +1,40 @@
+# Sites downloaded into the local knowledge base (agml-agent-kb crawl). Only sites whose robots.txt allows us:
+# checked 2026-11-03. Left out: PlantVillage, PNW Handbooks, APS Education Center and ProMusa (robots.txt blocks
+# ClaudeBot and other AI crawlers); TNAU Agritech (did not answer); Bugwood (its own site is news, its subject pages
+# are image databases). The crawler obeys robots.txt and Crawl-delay, waits at least 1 s between requests to a site
+# (or `delay`), and downloads HTML pages only.
+#
+#   allow / deny   regexes a URL must / must not match
+#   sitemaps       sitemap URLs (indexes are followed); start: start pages
+#   follow         also follow links found on pages (default true)
+#   max_pages      stop after this many HTML pages
+sites:
+  - name: ucipm
+    robots: https://ipm.ucanr.edu/robots.txt
+    start: [https://ipm.ucanr.edu/agriculture/, https://ipm.ucanr.edu/home-and-landscape/]
+    allow: '^https://ipm\.ucanr\.edu/(agriculture|home-and-landscape|PMG)/'
+    deny: '\?|/PDF/|/PUB/|/(weather|calludt|DS_|WATER)/'
+    max_pages: 6000
+
+  - name: ncsu_extension
+    robots: https://content.ces.ncsu.edu/robots.txt
+    sitemaps: [https://content.ces.ncsu.edu/sitemap.xml]
+    allow: '^https://content\.ces\.ncsu\.edu/[a-z0-9-]+/?$'
+    deny: '\?'
+    follow: false
+    max_pages: 9000
+
+  - name: texas_pdh
+    robots: https://plantdiseasehandbook.tamu.edu/robots.txt
+    sitemaps: [https://plantdiseasehandbook.tamu.edu/wp-sitemap-posts-post-1.xml,
+               https://plantdiseasehandbook.tamu.edu/wp-sitemap-posts-page-1.xml]
+    allow: '^https://plantdiseasehandbook\.tamu\.edu/'
+    deny: '\?|/wp-|/tag/|/category/|/author/|/feed/?$'
+    follow: false
+    max_pages: 1500
+
+  - name: feedipedia
+    robots: https://www.feedipedia.org/robots.txt
+    start: ['https://www.feedipedia.org/content/feeds?category=All']
+    allow: '^https://www\.feedipedia\.org/(node/\d+$|content/feeds\?category=All(&page=\d+)?$)'
+    max_pages: 1500
