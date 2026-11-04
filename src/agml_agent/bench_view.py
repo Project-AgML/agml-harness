@@ -319,8 +319,8 @@ def app() -> None:
         names = {f"{r['name']} · {Path(r['dir']).name}": r["dir"] for r in runs_kb}
         c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
         _, k = kb_summary(frame(names[c1.selectbox("Run", list(names))]))
-        filt = {c: c2.selectbox(c, ["all", "yes", "no"], key=c) if i == 0 else (c3 if i == 1 else c4).selectbox(c, ["all", "yes", "no"], key=c)
-                for i, c in enumerate(["page is the candidate", "correct class", "used"])}
+        filt = {c: col.selectbox(c, ["all", "yes", "no"], key=c)
+                for col, c in zip((c2, c3, c4), ["page is the candidate", "correct class", "used"])}
         for c, f in filt.items():
             if f != "all":
                 k = k[k[c] == (f == "yes")]
