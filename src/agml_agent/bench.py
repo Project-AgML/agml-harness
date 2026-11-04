@@ -297,7 +297,7 @@ def with_options(candidates, options: list[str]) -> list:
 def _name_line(text: str) -> str:
     """'Scientific name: ...; English common names: ...' from a taxonomy excerpt (lines or EPPO's '. '-joined fields)."""
     fields = [f.strip() for f in re.split(r"\n|\.\s+(?=[A-Z][A-Za-z ]+:)", text)]
-    return "; ".join(f for f in fields if NAME_FIELD.match(f))[:NAME_CHARS]
+    return "; ".join(f for f in fields if NAME_FIELD.match(f))
 
 
 def _clean_parts(res: dict, crop: str, task: str, description: str) -> list[str]:
@@ -310,7 +310,7 @@ def _clean_parts(res: dict, crop: str, task: str, description: str) -> list[str]
     from agml_agent.symptom_search import crop_names, focus
 
     crops = crop_names(crop)
-    parts, names = [], set()
+    parts, names, name_srcs = [], {}, {}
     for turn, (src, chs) in enumerate(res.items()):
         for i, ch in enumerate(chs):
             text, tags = ch["excerpt_text"], set(ch.get("tags") or [])
@@ -324,18 +324,41 @@ def _clean_parts(res: dict, crop: str, task: str, description: str) -> list[str]
                 title = raw.get("title") if isinstance(raw, dict) else None
                 text = (title and wikipedia.appearance_text(title, crops)) or text
             if CLEAN_TEXT >= 2 and tags <= TAXONOMY_TAGS:
-                # taxonomy-only text shrinks to its name lines (scientific name, common names, synonyms): they map local
-                # and common names to the options; the lineage takes space from appearance text
-                line = _name_line(text)
-                if line and line.lower() not in names:
-                    names.add(line.lower())
-                    parts.append(((-1, False, i, turn), f"[{src}] {line} (source: {ch['source_url']})"))
+                # taxonomy-only text shrinks to name fields (scientific name, common names, synonyms), merged across
+                # sources into one line: they map local and common names to the options; the lineage takes space from
+                # appearance text
+                for field in _name_line(text).split("; "):
+                    if field and field.lower() not in names:
+                        names[field.lower()] = field
+                        name_srcs.setdefault(src, ch["source_url"])
                 continue
             kind = 0 if tags & APPEARANCE_TAGS else 1 if tags & IDENTIFICATION_TAGS else 2
             on_crop = any(c in text.lower() for c in crops)
             parts.append(((kind, not on_crop, i, turn),
                           f"[{src}] {focus(text, description, PER_CHUNK_CHARS)} (source: {ch['source_url']})"))
+    if names:
+        line = "; ".join(names.values())[:NAME_CHARS]
+        parts.append(((-1, False, 0, 0), f"[names: {', '.join(name_srcs)}] {line} (source: {next(iter(name_srcs.values()))})"))
     return [p for _, p in sorted(parts, key=lambda kp: kp[0])]
+
+
+def _fit(parts: list[str], limit: int) -> str:
+    """Like _join, but the first part that doesn't fit is cut at a sentence end to the space left (keeping its source
+    and URL) rather than dropped, when at least 300 characters are left."""
+    out, size = [], 0
+    for part in parts:
+        room = limit - size
+        if len(part) <= room:
+            out.append(part)
+            size += len(part) + 2
+            continue
+        m = re.match(r"(\[[^\]]*\] )(.*)( \(source: [^)]*\))$", part, re.S)
+        if m and room >= 300:
+            body = m.group(2)[:room - len(m.group(1)) - len(m.group(3)) - 4]
+            body = body[:body.rfind(". ") + 1] or body
+            out.append(f"{m.group(1)}{body} ...{m.group(3)}")
+        break
+    return "\n\n".join(out)
 
 
 def _join(parts: list[str], limit: int) -> str:
@@ -372,7 +395,7 @@ def run_retrieve(description: str = "", candidates: list | None = None, crop: st
                 # sources take turns (first chunk of each, then second...), task-matching sources first
                 chunks = [f"[{src}] {focus(chs[i]['excerpt_text'], description, PER_CHUNK_CHARS)} (source: {chs[i]['source_url']})"
                           for i in range(max(map(len, res.values()), default=0)) for src, chs in res.items() if i < len(chs)]
-            body = _join(chunks, RESULT_CHARS // len(cands)) or (
+            body = (_fit(chunks, RESULT_CHARS // len(cands)) if CLEAN_TEXT >= 2 else _join(chunks, RESULT_CHARS // len(cands))) or (
                 f"No results found for {c['name']!r}. Try its scientific name or aliases, or another candidate.")
             sections.append(f"## {c['name']}\n{body}")
         return "\n\n".join(sections)

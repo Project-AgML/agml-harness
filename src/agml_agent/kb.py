@@ -45,9 +45,12 @@ LEAK = re.compile(r"\b(data ?sets?|machine learning|deep learning|neural network
 HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*#*$")
 LINK = re.compile(r"""href=["']([^"'#]+)""", re.I)
 LOC = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>")
-KINDS = [("symptom", re.compile(r"symptom|sign|identif|damage|descri|appearance|diagnos|characteristic|injur", re.I)),
+# "Diagnostic procedures" sections describe lab tests, not what the plant looks like: not symptom sections.
+KINDS = [("symptom", re.compile(r"symptom|signs?\b|identif|damage|descri|appearance|diagnosis|characteristic|injur", re.I)),
          ("life_cycle", re.compile(r"life ?cycle|biology|disease cycle|development|epidemiolog|spread", re.I)),
          ("management", re.compile(r"manag|control|treatment|prevent|monitor", re.I))]
+# Names that describe no organism: looking them up finds sections that only mention the word ("Healthy flowers...").
+NOT_NAMES = re.compile(r"^(healthy|normal|fresh|good|bad|ripe|unripe|rotten|damaged|other|none|unknown)\b", re.I)
 SECTION_CHARS = 1500  # long sections are split at paragraph breaks into parts of about this size
 MIN_SECTION_CHARS = 80
 
@@ -203,7 +206,10 @@ def build(root: Path) -> dict:
         seen_text = set()
         n_pages = 0
         for line in (d / "pages.jsonl").read_text().splitlines():
-            r = json.loads(line)
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:  # a line still being written by a running crawl
+                continue
             if not r.get("sha1"):
                 continue
             html = gzip.decompress((d / "html" / f"{r['sha1']}.html.gz").read_bytes()).decode("utf-8", "ignore")
@@ -257,11 +263,14 @@ class KB:
         return self._local.con
 
     def search(self, terms: list[str], crop: str = "", limit: int = 4, per_page: int = 2) -> list[dict]:
-        """Sections containing one of `terms` as a phrase, best first: term in the title or heading, then appearance
-        sections, then text mentioning `crop` (ordering only, nothing is filtered by crop), then BM25."""
+        """Sections about one of `terms` (tried in order), best first. A section counts as about the term if the
+        term is in its page title or heading; sections that only mention it in their text are used only when no
+        title or heading names it (quality check 2026-11-03: passing mentions were mostly tables and other topics).
+        Then appearance sections, then the crop in the title or text (ordering only, nothing is filtered by crop),
+        then BM25. Tables and names that describe no organism ("healthy", "Mg") are skipped."""
         out, seen_pages = [], {}
         crop = crop.lower().strip()
-        for term in dict.fromkeys(t for t in terms if t and t.strip()):
+        for term in dict.fromkeys(t.strip() for t in terms if t and len(t.strip()) >= 4 and not NOT_NAMES.match(t.strip())):
             phrase = '"' + term.replace('"', " ").strip() + '"'
             try:
                 rows = self._con().execute(
@@ -270,7 +279,10 @@ class KB:
             except sqlite3.OperationalError:
                 continue
             low = term.lower()
-            rows.sort(key=lambda r: (low not in (r[0] + " " + r[1]).lower(), r[5] != "symptom",
+            rows = [r for r in rows if r[2].count("|") < 8]  # tables: lists of names, not descriptions
+            named = [r for r in rows if low in (r[0] + " " + r[1]).lower()]
+            rows = named or rows
+            rows.sort(key=lambda r: (low not in r[0].lower(), r[5] != "symptom",
                                      bool(crop) and crop not in (r[0] + " " + r[2]).lower(), r[6]))
             for title, heading, text, site, url, kind, score in rows:
                 if seen_pages.get(url, 0) >= per_page or any(o["text"] == text for o in out):
