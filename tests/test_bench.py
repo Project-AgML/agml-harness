@@ -86,7 +86,7 @@ def _args(data_dir, tmp_path, endpoint, **kw):
     a = dict(data_dir=data_dir, model="google/gemma-4-12B-it", endpoint=endpoint, tools=["retrieve"], max_tool_calls=4,
              task=None, format=["mcqa_within"], only="tomato", limit_per_dataset=None, concurrency=4, thinking=True,
              reasoning_effort="low", max_tokens=None, max_model_len=None, seed=0, out=tmp_path / "runs", run_dir=None,
-             judge=False, judge_endpoint=None, retrieve_cache=None, no_retrieve_cache=False, no_live_search=False, clean_text=False, check_options=False, kb=None,
+             judge=False, judge_endpoint=None, retrieve_cache=None, no_retrieve_cache=False, no_live_search=False, clean_text=False, check_options=False, kb=None, keep_healthy=False,
              retrieve_mode="description+candidates")
     return argparse.Namespace(**{**a, **kw})
 
@@ -254,6 +254,34 @@ def test_crosscheck_look_first_keeps_the_first_answer_if_the_budget_runs_out(dat
     t = json.loads((rd / "traces.jsonl").read_text().splitlines()[0])
     p = json.loads((rd / "predictions.jsonl").read_text().splitlines()[0])
     assert t["kept_first"] and t["finish_reason"] == "length" and p["answer"] == "Late blight" and p["finish_reason"] == "stop"
+
+
+@pytest.mark.parametrize("answer,healthy", [("Healthy", True), ("The leaf appears healthy with no visible disease.", True),
+                                            ("No significant disease, pest damage, or stress is visible.", True),
+                                            ("Not healthy: bean rust", False), ("Unhealthy leaf", False), ("Bean rust", False)])
+def test_healthy_answers_are_recognised(answer, healthy):
+    assert bool(bench.HEALTHY_ANSWER.search(answer)) == healthy
+
+
+def test_keep_healthy_gives_a_healthy_first_answer_a_second_look_without_the_tool(data_dir, tmp_path, fake_server, monkeypatch):
+    endpoint, calls = fake_server
+    monkeypatch.setattr(bench, "HEALTHY_ANSWER", bench.re.compile("blight", bench.re.I))  # the fake model answers "Late blight"
+    rd = bench.run(_args(data_dir, tmp_path, endpoint, retrieve_mode="crosscheck-look-first", keep_healthy=True, limit_per_dataset=1))
+    look, second = FakeVLLM.requests[:2]
+    assert "tools" not in second and second["messages"][-1]["content"] == bench.HEALTHY_CHECK_PROMPT and not calls
+    t = json.loads((rd / "traces.jsonl").read_text().splitlines()[0])
+    assert t["healthy_first"] and t["turns"] == 2
+
+
+def test_disease_names_on_another_host_are_not_shown(monkeypatch):
+    monkeypatch.setattr(bench, "CLEAN_TEXT", 2)
+    res = {"eppo": [{"excerpt_text": "Preferred name: Fusarium oxysporum f. sp. cepae (EPPO code FUSACE). English common "
+                                     "names: basal rot of onion", "tags": ["taxonomy"], "source_url": "https://eppo/FUSACE"}],
+           "eol": [{"excerpt_text": "Fusarium wilt causes yellowing", "tags": ["identification"], "source_url": "u"}]}
+    parts = bench._clean_parts(res, "banana", "disease", "", {"name": "Fusarium wilt"})
+    assert parts == ["[eol] Fusarium wilt causes yellowing (source: u)"]
+    parts = bench._clean_parts(res, "", "species", "", {"name": "sarpagandha"})  # organism names keep their names line
+    assert parts[0].startswith("[names: eppo]")
 
 
 def test_agml_tools_are_not_allowed():

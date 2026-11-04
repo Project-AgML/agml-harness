@@ -141,6 +141,11 @@ uv run agml-agent-bench ... --run-dir runs/<run>                                
     is quality. `--clean-text 2` also shows Wikipedia's appearance sections (Symptoms, Description...) and shrinks
     taxonomy to name lines (scientific name, common names, synonyms).
   - `--check-options`: on multiple choice, every answer option is looked up, then the model's own candidates (up to 6).
+  - `--keep-healthy` (`crosscheck-look-first`): a first answer that finds no problem gets a second look without the
+    tool, kept unless the image clearly shows a problem (vivid symptom text talked healthy plants into problems).
+  - With `--clean-text 2`, EPPO, GBIF and Catalogue of Life names and hosts for a disease's common name (e.g.
+    "Fusarium wilt") are shown only if the text names the candidate: a name lookup can land on another host's
+    disease.
   - `--kb DIR`: also search the local knowledge base (below); its sections come first.
   - Pages from sites whose robots.txt blocks AI crawlers (PlantVillage, PNW Handbooks, APS, ProMusa) are never shown,
     even from the cache.

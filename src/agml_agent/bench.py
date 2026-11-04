@@ -215,6 +215,14 @@ PLACEBO_MODES = {"crosscheck-placebo", "crosscheck-look-first-placebo"}
 # answer (token budget, server error), the first answer stands.
 LOOK_ONLY_TASKS = {"detection", "segmentation"}
 CHECK_PROMPT = "That is your first answer. You may cross-check it, then give your final answer in the format asked."
+# --keep-healthy: a first answer that finds no problem gets a second look without the tool. Knowledge-base runs
+# (2026-11-04): vivid symptom text turned 12 of 103 healthy first answers into a problem (4 with no cleanup, 8 with
+# --clean-text 1). The model can still change its answer when the image clearly shows a problem.
+KEEP_HEALTHY = False
+HEALTHY_ANSWER = re.compile(r"(?<!un)(?<!not )\bhealthy\b|\bno (visible |obvious |apparent |significant |clear |notable )?"
+                            r"(signs?|disease|pests?|damage|stress|symptoms?|problems?|issues?)\b|\bnormal\b|\bfresh\b", re.I)
+HEALTHY_CHECK_PROMPT = ("That is your first answer: you found no problem. Change it only if the image shows clear visible "
+                        "evidence of a specific problem; otherwise keep it. Give your final answer in the format asked.")
 
 PER_CHUNK_CHARS = 1200
 # After a description search. Pilot 2: the model answered with the first page's cause and never checked it, and a
@@ -247,6 +255,9 @@ CLEAN_TEXT = 0
 APPEARANCE_TAGS, IDENTIFICATION_TAGS = {"symptom", "damage"}, {"identification", "grade_defect"}
 DISAMBIGUATION = re.compile(r"\bmay (also )?refer to\b|\bmay mean\b|disambiguation", re.I)
 TAXONOMY_TAGS = {"taxonomy", "synonym", "distribution"}
+NAME_SOURCES = {"eppo", "gbif", "catalogue_of_life"}
+DISEASE_NAME = re.compile(r"wilt|spot|blight|rot\b|rust|mildew|mosaic|canker|scab|curl|virus|disease|damage|mold|mould|"
+                          r"blast|smut|anthracnose|streak|stripe|yellows|dieback|die back|deficien", re.I)
 NAME_FIELD = re.compile(r"(Scientific name|Preferred name|Common names?|English common names|Synonyms)\s*:", re.I)
 NAME_CHARS = 300
 BOILERPLATE = re.compile(r"An official website of the United States government|^N/A \(or sometimes", re.I)
@@ -300,7 +311,7 @@ def _name_line(text: str) -> str:
     return "; ".join(f for f in fields if NAME_FIELD.match(f))
 
 
-def _clean_parts(res: dict, crop: str, task: str, description: str) -> list[str]:
+def _clean_parts(res: dict, crop: str, task: str, description: str, cand: dict | None = None) -> list[str]:
     """--clean-text. Repeats (2026-10-31): EPPO's taxonomy came first for 45% of candidates, 39% of results mentioned the
     crop, and there were disambiguation pages, wrong entities and USDA grades on non-grade names. So: appearance text
     (symptoms, damage) first, then identification notes, then taxonomy; text mentioning the crop first within each;
@@ -323,6 +334,11 @@ def _clean_parts(res: dict, crop: str, task: str, description: str) -> list[str]
                 raw = _loads(ch.get("raw_response") or "{}")
                 title = raw.get("title") if isinstance(raw, dict) else None
                 text = (title and wikipedia.appearance_text(title, crops)) or text
+            if CLEAN_TEXT >= 2 and src in NAME_SOURCES and cand and DISEASE_NAME.search(cand["name"]) and not any(
+                    n and n.lower() in text.lower() for n in (cand["name"], cand.get("scientific_name"))):
+                # a disease's common name looked up as a name finds some organism, often on another host ("Fusarium
+                # wilt" -> EPPO's onion basal rot): its names and hosts are shown only if the text names the candidate
+                continue
             if CLEAN_TEXT >= 2 and tags <= TAXONOMY_TAGS:
                 # taxonomy-only text shrinks to name fields (scientific name, common names, synonyms), merged across
                 # sources into one line: they map local and common names to the options; the lineage takes space from
@@ -390,7 +406,7 @@ def run_retrieve(description: str = "", candidates: list | None = None, crop: st
         for c, res in zip(cands, found):
             res = {src: [ch for ch in chs if not LEAK.search(ch["excerpt_text"])] for src, chs in res.items()}
             if CLEAN_TEXT:
-                chunks = _clean_parts(res, crop, task, description)
+                chunks = _clean_parts(res, crop, task, description, c)
             else:
                 # sources take turns (first chunk of each, then second...), task-matching sources first
                 chunks = [f"[{src}] {focus(chs[i]['excerpt_text'], description, PER_CHUNK_CHARS)} (source: {chs[i]['source_url']})"
@@ -472,7 +488,7 @@ class HarnessMethod(VLMMethod):
                 "max_tool_calls": self.max_tool_calls, "retrieve_mode": self.retrieve_mode, "agml_agent": importlib.metadata.version("agml-agent"),
                 "agml_agent_git": _git_sha(Path(__file__).parent), "agbench_commit": _agbench_commit(),
                 "retrieve_cache": str(cache.CACHE.path) if cache.CACHE else None, "live_search": scrape.LIVE_SEARCH,
-                "clean_text": CLEAN_TEXT, "check_options": CHECK_OPTIONS,
+                "clean_text": CLEAN_TEXT, "check_options": CHECK_OPTIONS, "keep_healthy": KEEP_HEALTHY,
                 "kb": str(KB_INDEX.path) if KB_INDEX is not None else None}
 
     async def _create(self, **kw):
@@ -528,13 +544,13 @@ class HarnessMethod(VLMMethod):
         prompt_tokens = completion_tokens = 0
         text, finish, err, t0 = "", "stop", None, time.perf_counter()
         look_first = self.retrieve_mode.startswith("crosscheck-look-first")
-        looking, first_answer = look_first, None
+        looking, first_answer, tools_off = look_first, None, False
         for _ in range(self.max_tool_calls + 2 + look_first):
             remaining = self.max_tokens - completion_tokens
             if remaining <= 0:
                 finish = "length"
                 break
-            offer = {} if looking else {"tools": schemas, "tool_choice": "auto" if n_calls < self.max_tool_calls else "none"}
+            offer = {} if looking or tools_off else {"tools": schemas, "tool_choice": "auto" if n_calls < self.max_tool_calls else "none"}
             r, err = await self._create(model=model, messages=messages, max_tokens=remaining, temperature=temperature,
                                         extra_body=body or None, **offer)
             if r is None:
@@ -553,7 +569,9 @@ class HarnessMethod(VLMMethod):
                 if finish != "stop" or not text or item.task in LOOK_ONLY_TASKS:
                     break
                 first_answer = text
-                messages += [{"role": "assistant", "content": text}, {"role": "user", "content": CHECK_PROMPT}]
+                tools_off = KEEP_HEALTHY and bool(HEALTHY_ANSWER.search(text))  # a healthy first answer: second look, no tool
+                messages += [{"role": "assistant", "content": text},
+                             {"role": "user", "content": HEALTHY_CHECK_PROMPT if tools_off else CHECK_PROMPT}]
                 continue
             if not calls:
                 break
@@ -578,6 +596,7 @@ class HarnessMethod(VLMMethod):
         await self._write_trace({"item_id": item.item_id, "dataset": item.dataset, "n_tool_calls": n_calls,
                                  "tools_used": used, "tool_s": round(tool_s, 3), "turns": sum(s["role"] == "assistant" for s in trace),
                                  "finish_reason": checked_finish, "error": err, "first_answer": first_answer, "kept_first": kept_first,
+                                 "healthy_first": tools_off,
                                  "trace": trace})
         reasoning_all = "\n\n".join(
             s["reasoning"] + "".join(f"\n[called {c['name']}({json.dumps(c['arguments'], ensure_ascii=False)})]" for c in s["tool_calls"])
@@ -630,8 +649,8 @@ def run(args: argparse.Namespace) -> Path:
     load_dotenv()
     cache.CACHE = None if args.no_retrieve_cache else RetrievalCache(args.retrieve_cache or args.out / "retrieve_cache.jsonl")
     scrape.LIVE_SEARCH = not args.no_live_search
-    global CLEAN_TEXT, CHECK_OPTIONS, KB_INDEX
-    CLEAN_TEXT, CHECK_OPTIONS = args.clean_text, args.check_options
+    global CLEAN_TEXT, CHECK_OPTIONS, KB_INDEX, KEEP_HEALTHY
+    CLEAN_TEXT, CHECK_OPTIONS, KEEP_HEALTHY = args.clean_text, args.check_options, args.keep_healthy
     if args.kb:
         from agml_agent.kb import KB
         KB_INDEX = KB(args.kb)
@@ -640,7 +659,8 @@ def run(args: argparse.Namespace) -> Path:
     spec = model_spec(args.model)
     conc = args.concurrency or (spec.get("parallel", 2) if spec["backend"] == "llamacpp" else spec["concurrency"])
     tag = ("tools" if args.retrieve_mode == "description+candidates" else f"tools-{args.retrieve_mode}") + (
-        {0: "", 1: "-clean", 2: "-clean2"}[args.clean_text] + ("-options" if args.check_options else "") + ("-kb" if args.kb else ""))
+        {0: "", 1: "-clean", 2: "-clean2"}[args.clean_text] + ("-options" if args.check_options else "") + ("-kb" if args.kb else "") + (
+        "-keephealthy" if args.keep_healthy else ""))
     rd = args.run_dir or args.out / f"{args.model.replace('/', '__')}__{tag}_{datetime.now():%Y%m%d-%H%M%S}"
     rd.mkdir(parents=True, exist_ok=True)
 
@@ -694,6 +714,9 @@ def main() -> None:
                         "2: also Wikipedia's appearance sections (Symptoms, Description...) and taxonomy as name lines."),
     p.add_argument("--check-options", action="store_true",
                    help=f"On multiple choice, look up every answer option, then the model's candidates (up to {MAX_WITH_OPTIONS}).")
+    p.add_argument("--keep-healthy", action="store_true",
+                   help="crosscheck-look-first: a first answer that finds no problem gets a second look without the tool, "
+                        "kept unless the image clearly shows a problem.")
     p.add_argument("--kb", type=Path, help="Local knowledge base folder (agml-agent-kb), searched next to the API sources.")
     p.add_argument("--no-live-search", action="store_true",
                    help="Web searches (fact-sheet sites) come only from the cache; API sources still look up live. "
