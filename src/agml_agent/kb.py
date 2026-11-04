@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import html as html_lib
 import json
 import os
 import re
@@ -162,7 +163,7 @@ class Crawler:
     def _links(self, base: str, html: str) -> list[str]:
         out = []
         for href in LINK.findall(html):
-            u = urldefrag(urljoin(base, href.strip()))[0]
+            u = urldefrag(urljoin(base, html_lib.unescape(href.strip())))[0]  # "&amp;" in hrefs is "&"
             if urlparse(u).scheme not in ("http", "https"):
                 continue
             if re.search(r"\.(pdf|docx?|xlsx?|pptx?)$", u, re.I):  # documents: not downloaded (yet), but listed
