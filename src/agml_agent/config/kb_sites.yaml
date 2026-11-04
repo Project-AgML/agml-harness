@@ -6,7 +6,7 @@
 #
 #   allow / deny   regexes a URL must / must not match
 #   sitemaps       sitemap URLs (indexes are followed); start: start pages
-#   follow         also follow links found on pages (default true)
+#   follow         also follow links found on pages (default true); follow_from: only on pages matching this regex
 #   max_pages      stop after this many HTML pages
 sites:
   - name: ucipm
@@ -37,4 +37,7 @@ sites:
     robots: https://www.feedipedia.org/robots.txt
     start: ['https://www.feedipedia.org/content/feeds?category=All']
     allow: '^https://www\.feedipedia\.org/(node/\d+$|content/feeds\?category=All(&page=\d+)?$)'
-    max_pages: 1500
+    # links followed only on the feed list pages, which link the species datasheets; datasheets link thousands of
+    # literature references and nutrient tables (17,000 pages at the site's 10 s crawl delay, 2026-11-03)
+    follow_from: 'content/feeds\?category=All'
+    max_pages: 3000

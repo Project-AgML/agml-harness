@@ -51,6 +51,8 @@ KINDS = [("symptom", re.compile(r"symptom|signs?\b|identif|damage|descri|appeara
          ("management", re.compile(r"manag|control|treatment|prevent|monitor", re.I))]
 # Names that describe no organism: looking them up finds sections that only mention the word ("Healthy flowers...").
 NOT_NAMES = re.compile(r"^(healthy|normal|fresh|good|bad|ripe|unripe|rotten|damaged|other|none|unknown)\b", re.I)
+# Site navigation that text extraction keeps on small pages (UC IPM photo pages): such sections are dropped.
+NAVIGATION = re.compile(r"Notifications Loading|Manage Pests Home|Skip to (main )?content", re.I)
 SECTION_CHARS = 1500  # long sections are split at paragraph breaks into parts of about this size
 MIN_SECTION_CHARS = 80
 
@@ -74,6 +76,7 @@ class Crawler:
         self.max_pages = max_pages or cfg.get("max_pages", 5000)
         self.allow = re.compile(cfg["allow"])
         self.deny = re.compile(cfg["deny"]) if cfg.get("deny") else None
+        self.follow_from = re.compile(cfg["follow_from"]) if cfg.get("follow_from") else None
         # robots.txt fetched with our User-Agent: urllib's reader uses its own, which some sites refuse (it then
         # treats the whole site as disallowed)
         self.robots = urllib.robotparser.RobotFileParser(cfg["robots"])
@@ -125,7 +128,7 @@ class Crawler:
         fetched = sum(r["status"] == 200 for r in self.done.values())
         # pages already fetched are re-read from disk for their links, so an interrupted crawl continues where it was
         for r in list(self.done.values()):
-            if r.get("sha1") and self.cfg.get("follow", True):
+            if r.get("sha1") and self._follows(r["url"]):
                 html = gzip.decompress((self.dir / "html" / f"{r['sha1']}.html.gz").read_bytes()).decode("utf-8", "ignore")
                 queue += [u for u in self._links(r["url"], html) if u not in seen and not seen.add(u)]
         with open(self.dir / "pages.jsonl", "a") as log:
@@ -138,7 +141,7 @@ class Crawler:
                     rec["final_url"], rec["sha1"] = r.url, hashlib.sha1(r.url.encode()).hexdigest()
                     (self.dir / "html" / f"{rec['sha1']}.html.gz").write_bytes(gzip.compress(r.content))
                     fetched += 1
-                    if self.cfg.get("follow", True):
+                    if self._follows(url):
                         queue += [u for u in self._links(r.url, r.text) if u not in seen and not seen.add(u)]
                 log.write(json.dumps(rec) + "\n")
                 log.flush()
@@ -152,6 +155,9 @@ class Crawler:
             {**report, "skipped_documents_urls": sorted(self.skipped["documents"]),
              "skipped_robots_urls": sorted(self.skipped["robots"]), "queue": queue}, indent=1))
         return report
+
+    def _follows(self, url: str) -> bool:
+        return self.cfg.get("follow", True) and (self.follow_from is None or bool(self.follow_from.search(url)))
 
     def _links(self, base: str, html: str) -> list[str]:
         out = []
@@ -239,6 +245,8 @@ def build(root: Path) -> dict:
                 continue
             n_pages += 1
             for head, text in sections(md, title):
+                if NAVIGATION.search(text[:300]):
+                    continue
                 key = hashlib.sha1(text.encode()).hexdigest()
                 if key in seen_text:  # navigation blocks and boilerplate repeated across pages
                     continue
@@ -291,7 +299,6 @@ class KB:
         Then appearance sections, then the crop in the title or text (ordering only, nothing is filtered by crop),
         then BM25. Tables and names that describe no organism ("healthy", "Mg") are skipped."""
         out, seen_pages = [], {}
-        crop = crop.lower().strip()
         for term in dict.fromkeys(t.strip() for t in terms if t and len(t.strip()) >= 4 and not NOT_NAMES.match(t.strip())):
             phrase = '"' + term.replace('"', " ").strip() + '"'
             try:
@@ -303,9 +310,11 @@ class KB:
             low = term.lower()
             rows = [r for r in rows if r[2].count("|") < 8]  # tables: lists of names, not descriptions
             named = [r for r in rows if low in (r[0] + " " + r[1]).lower()]
-            rows = named or rows
-            rows.sort(key=lambda r: (low not in r[0].lower(), r[5] != "symptom",
-                                     bool(crop) and crop not in (r[0] + " " + r[2]).lower(), r[6]))
+            # without a title or heading naming it, the exact term must be in the text (stemming matches "Thumbe" to
+            # "thumb")
+            rows = named or [r for r in rows if low in r[2].lower()]
+            on_crop = self._pages_mentioning({r[4] for r in rows}, crop)
+            rows.sort(key=lambda r: (low not in r[0].lower(), r[4] not in on_crop, r[5] != "symptom", r[6]))
             for title, heading, text, site, url, kind, score in rows:
                 if seen_pages.get(url, 0) >= per_page or any(o["text"] == text for o in out):
                     continue
@@ -317,6 +326,20 @@ class KB:
             if out:  # the first term that finds anything wins (class name, then scientific name, then aliases)
                 return out
         return out
+
+
+    def _pages_mentioning(self, urls: set[str], crop: str) -> set[str]:
+        """The pages (any of their sections) that mention the crop or one of its other names."""
+        if not crop or not urls:
+            return set()
+        from agml_agent.symptom_search import crop_names
+        q = " OR ".join('"' + c.replace('"', " ") + '"' for c in crop_names(crop))
+        marks = ",".join("?" * len(urls))
+        try:
+            return {u for (u,) in self._con().execute(
+                f"SELECT DISTINCT url FROM docs WHERE docs MATCH ? AND url IN ({marks})", (q, *urls))}
+        except sqlite3.OperationalError:
+            return set()
 
 
 def main() -> None:
