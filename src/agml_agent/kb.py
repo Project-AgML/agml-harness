@@ -88,10 +88,16 @@ class Crawler:
                 r = json.loads(line)
                 self.done[r["url"]] = r
         self._last = 0.0
+        # links found but not fetched, by reason: reported in crawl.json so nothing is lost silently
+        self.skipped = {"robots": set(), "documents": set()}
 
     def ok(self, url: str) -> bool:
-        return (bool(self.allow.search(url)) and not (self.deny and self.deny.search(url))
-                and self.robots.can_fetch(HEADERS["User-Agent"], url))
+        if not self.allow.search(url) or (self.deny and self.deny.search(url)):
+            return False
+        if not self.robots.can_fetch(HEADERS["User-Agent"], url):
+            self.skipped["robots"].add(url)
+            return False
+        return True
 
     def get(self, url: str) -> requests.Response | None:
         time.sleep(max(0.0, self._last + self.delay - time.monotonic()))
@@ -137,14 +143,26 @@ class Crawler:
                 log.write(json.dumps(rec) + "\n")
                 log.flush()
                 self.done[url] = rec
-        return {"site": self.name, "pages": fetched, "queued": len(queue), "delay_s": self.delay}
+        report = {"site": self.name, "pages": fetched, "delay_s": self.delay, "max_pages": self.max_pages,
+                  "cap_reached": bool(queue), "not_fetched_queue": len(queue),
+                  "errors": sum(r["status"] != 200 for r in self.done.values()),
+                  "skipped_robots": len(self.skipped["robots"]), "skipped_documents": len(self.skipped["documents"]),
+                  "finished": str(date.today())}
+        (self.dir / "crawl.json").write_text(json.dumps(
+            {**report, "skipped_documents_urls": sorted(self.skipped["documents"]),
+             "skipped_robots_urls": sorted(self.skipped["robots"]), "queue": queue}, indent=1))
+        return report
 
     def _links(self, base: str, html: str) -> list[str]:
         out = []
         for href in LINK.findall(html):
             u = urldefrag(urljoin(base, href.strip()))[0]
-            if urlparse(u).scheme in ("http", "https") and not re.search(r"\.(pdf|jpe?g|png|gif|zip|docx?|xlsx?)$", u, re.I) \
-                    and self.ok(u):
+            if urlparse(u).scheme not in ("http", "https"):
+                continue
+            if re.search(r"\.(pdf|docx?|xlsx?|pptx?)$", u, re.I):  # documents: not downloaded (yet), but listed
+                if self.allow.search(u):
+                    self.skipped["documents"].add(u)
+            elif not re.search(r"\.(jpe?g|png|gif|svg|webp|ico|css|js|zip|mp4|mp3)$", u, re.I) and self.ok(u):
                 out.append(u)
         return out
 
@@ -228,6 +246,10 @@ def build(root: Path) -> dict:
                 rows.append({"site": name, "url": r["final_url"], "title": title, "heading": head,
                              "kind": kind_of(head), "text": text})
         counts[name] = {"pages": n_pages, "sections": sum(x["site"] == name for x in rows)}
+        if (d / "crawl.json").exists():  # what the crawl did not fetch, and whether it stopped at its page cap
+            c = json.loads((d / "crawl.json").read_text())
+            counts[name]["crawl"] = {k: c[k] for k in ("pages", "cap_reached", "not_fetched_queue", "errors",
+                                                       "skipped_robots", "skipped_documents", "finished") if k in c}
     with gzip.open(root / "docs.jsonl.gz", "wt") as f:
         for x in rows:
             f.write(json.dumps(x, ensure_ascii=False) + "\n")
