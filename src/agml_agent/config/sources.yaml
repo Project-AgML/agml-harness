@@ -77,7 +77,7 @@ sources:
                        # platform but wasn't reachable/parseable to confirm
                        # from this sandbox.
     license: "Public domain (US government)"
-    status: active
+    status: paused   # returned nothing for any of 24 real candidates (2026-11-03) and took ~2 s each
 
   - name: usda_plants
     module: agml_agent.sources.usda_plants

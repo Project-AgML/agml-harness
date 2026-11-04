@@ -86,7 +86,7 @@ def _args(data_dir, tmp_path, endpoint, **kw):
     a = dict(data_dir=data_dir, model="google/gemma-4-12B-it", endpoint=endpoint, tools=["retrieve"], max_tool_calls=4,
              task=None, format=["mcqa_within"], only="tomato", limit_per_dataset=None, concurrency=4, thinking=True,
              reasoning_effort="low", max_tokens=None, max_model_len=None, seed=0, out=tmp_path / "runs", run_dir=None,
-             judge=False, judge_endpoint=None, retrieve_cache=None, no_retrieve_cache=False, no_live_search=False,
+             judge=False, judge_endpoint=None, retrieve_cache=None, no_retrieve_cache=False, no_live_search=False, clean_text=False,
              retrieve_mode="description+candidates")
     return argparse.Namespace(**{**a, **kw})
 
@@ -220,6 +220,34 @@ def test_crosscheck_look_first_stops_at_the_first_answer_on_look_only_tasks(data
     assert t["turns"] == 1 and t["first_answer"] is None and not t["kept_first"]
 
 
+def test_clean_text_puts_appearance_first_and_drops_junk():
+    ch = lambda text, tags, url="u": {"excerpt_text": text, "tags": tags, "source_url": url}
+    res = {"eppo": [ch("Preferred name: Hemileia vastatrix. Kingdom: Fungi", ["taxonomy"])],
+           "usda_ams_grades": [ch("Grades of Apples: U.S. Extra Fancy", ["grade_defect"])],
+           "wikipedia": [ch("Rust may refer to: iron oxide", ["symptom"]), ch("Iron corrosion forms oxides", ["symptom"]),
+                         ch("Orange powdery pustules on the leaf underside of coffee plants", ["symptom"])],
+           "eol": [ch("A fungus on other hosts with orange spores", ["identification"])]}
+    parts = bench._clean_parts(res, "coffee", "disease", "")
+    assert [p.split("]")[0] for p in parts] == ["[wikipedia", "[eol", "[eppo"] and "coffee" in parts[0]
+    assert len(bench._clean_parts(res, "coffee", "", "")) == 4  # grades kept when no task is given
+
+
+def test_lookup_deadline_leaves_out_slow_sources(monkeypatch):
+    import time
+    from agml_agent import retrieve
+    monkeypatch.setattr(retrieve, "_active_source_names", lambda: ["fast", "slow"])
+    monkeypatch.setattr(retrieve, "_load_sources", lambda: {n: {"status": "active", "task": [], "module": n} for n in ("fast", "slow")})
+    monkeypatch.setattr(retrieve, "_CACHE", {})
+    class Mod:
+        def __init__(self, delay): self.delay = delay
+        def fetch(self, q):
+            time.sleep(self.delay)
+            return [type("C", (), {"to_dict": lambda s: {"excerpt_text": "x"}})()]
+    monkeypatch.setattr(retrieve.importlib, "import_module", lambda n: Mod(0 if n == "fast" else 3))
+    t0 = time.time()
+    assert list(retrieve.retrieve("rust", deadline=0.5)) == ["fast"] and time.time() - t0 < 2
+
+
 def test_crosscheck_look_first_keeps_the_first_answer_if_the_budget_runs_out(data_dir, tmp_path, fake_server):
     endpoint, calls = fake_server
     rd = bench.run(_args(data_dir, tmp_path, endpoint, retrieve_mode="crosscheck-look-first", limit_per_dataset=1, max_tokens=5))
@@ -271,8 +299,10 @@ def test_candidates_are_looked_up_by_name(monkeypatch, no_cache):
                                                          {"name": "early blight", "aliases": ["Alternaria"]}], "tomato", "disease")
     assert out.index("## late blight") < out.index("## early blight")
     assert f"[ucipm_aps] {text} (source: https://ipm/late blight)" in out  # short excerpts are kept whole
-    assert ("late blight", {"crop": "tomato", "scientific_name": "Phytophthora infestans", "aliases": []}) in seen
-    assert ("early blight", {"crop": "tomato", "scientific_name": None, "aliases": ["Alternaria"]}) in seen
+    assert ("late blight", {"crop": "tomato", "scientific_name": "Phytophthora infestans", "aliases": [],
+                            "deadline": bench.SOURCE_DEADLINE}) in seen
+    assert ("early blight", {"crop": "tomato", "scientific_name": None, "aliases": ["Alternaria"],
+                            "deadline": bench.SOURCE_DEADLINE}) in seen
 
 
 def test_every_database_is_searched_task_only_orders(monkeypatch, no_cache):

@@ -35,7 +35,7 @@ import argparse
 import importlib
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from importlib.resources import files
 
 import yaml
@@ -83,6 +83,7 @@ def retrieve(
     scientific_name: str | None = None,
     aliases: list[str] | None = None,
     sources: list[str] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, list[dict]]:
     """Returns {source_name: [chunk_dict, ...]} — only sources that returned
     at least one chunk are present as keys. A source erroring (bad key,
@@ -122,9 +123,13 @@ def retrieve(
             _CACHE[cache_key] = chunk_dicts
         return chunk_dicts
 
-    # Sources are independent (different sites and APIs): asked in parallel, results kept in config order.
-    with ThreadPoolExecutor(max(1, min(len(requested), 8))) as ex:
-        found = list(ex.map(one, requested))
+    # Sources are independent (different sites and APIs): asked in parallel, results kept in config order. With a
+    # deadline (seconds), sources still running then are left out (their threads finish in the background).
+    ex = ThreadPoolExecutor(max(1, min(len(requested), 8)))
+    futures = [ex.submit(one, name) for name in requested]
+    wait(futures, timeout=deadline)
+    ex.shutdown(wait=False, cancel_futures=True)
+    found = [f.result() if f.done() and not f.cancelled() else [] for f in futures]
     results = {name: chunks for name, chunks in zip(requested, found) if chunks}
     return results
 

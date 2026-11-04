@@ -9,6 +9,8 @@ photos are never passed on. Scientific names match best; common names often find
 from __future__ import annotations
 
 import re
+import threading
+import time
 from datetime import date
 
 from agml_agent.common.http import get
@@ -18,18 +20,28 @@ from agml_agent.sources.base import ClassQuery
 
 API = "https://api.inaturalist.org/v1/taxa"
 LICENSE = "iNaturalist taxon data; summary from Wikipedia (CC BY-SA)"
+# iNaturalist asks for <= ~1 request/s: requests are spaced across all threads, not only within one lookup.
+INTERVAL = 1.0
+_pace_lock, _last = threading.Lock(), [0.0]
+
+
+def _get(url: str, **kw):
+    with _pace_lock:
+        time.sleep(max(0.0, _last[0] + INTERVAL - time.monotonic()))
+        _last[0] = time.monotonic()
+    return get(url, sleep=0, **kw)
 
 
 def fetch(query: ClassQuery) -> list[RetrievedChunk]:
     terms = ([query.scientific_name] if query.scientific_name else []) + query.search_terms()
     for term in dict.fromkeys(terms):
-        r = get(API, params={"q": term, "per_page": 1}, sleep=1.0)  # iNaturalist asks for <= ~1 request/s
+        r = _get(API, params={"q": term, "per_page": 1})
         hits = r.json().get("results", []) if r is not None and r.ok else []
         # the top hit must be the term itself (or have it as a name), not a fuzzy neighbour
         if not hits or term.lower() not in " ".join([hits[0].get("matched_term") or "", hits[0]["name"],
                                                      hits[0].get("preferred_common_name") or ""]).lower():
             continue
-        r = get(f"{API}/{hits[0]['id']}", sleep=1.0)
+        r = _get(f"{API}/{hits[0]['id']}")
         t = (r.json().get("results") or [None])[0] if r is not None and r.ok else None
         if not t:
             continue

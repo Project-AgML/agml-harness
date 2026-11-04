@@ -223,8 +223,21 @@ NEXT_STEP = ("\n\nThis is a search by symptoms, not a diagnosis: it returns page
              "answering, check the most likely causes (from these pages or your own) with candidates and compare their "
              "symptoms with the image.")
 RESULT_CHARS = 6000
-LIVE_LOOKUPS = 4  # concurrent live lookups across all items: the search backends rate-limit
+# Concurrent live lookups across all items. Was 4 while web search ran live (rate-limited); with --no-live-search only
+# the APIs are asked, and look-first runs (2026-11-02) spent most of each call's 2-6 min queueing for these slots.
+LIVE_LOOKUPS = 12
+# A lookup returns the sources that answered within this many seconds. Timing 24 real candidates (2026-11-03): one
+# lookup took ~15 s, set by Catalogue of Life (median 14 s, max 68 s) and GBIF (median 9 s), both taxonomy only.
+SOURCE_DEADLINE = 15
 _live = threading.Semaphore(LIVE_LOOKUPS)
+# --clean-text: what each candidate's reference text shows, and in what order (see _clean_parts).
+CLEAN_TEXT = False
+APPEARANCE_TAGS, IDENTIFICATION_TAGS = {"symptom", "damage"}, {"identification", "grade_defect"}
+DISAMBIGUATION = re.compile(r"\bmay (also )?refer to\b|\bmay mean\b|disambiguation", re.I)
+BOILERPLATE = re.compile(r"An official website of the United States government|^N/A \(or sometimes", re.I)
+# Wikipedia pages about the wrong thing ("rust" -> iron corrosion, carambola -> carbon nanotubes) name no living thing.
+BIOLOGY = re.compile(r"plant|leaf|leaves|crop|fung|bacteri|virus|insect|pest|disease|species|genus|famil|weed|fruit|"
+                     r"seed|grain|root|stem|flower|cultivar|variet|host|larva|mite|nematode|tree|herb|grass", re.I)
 
 
 def _cached(key: list, fetch):
@@ -241,9 +254,34 @@ def _lookup(c: dict, crop: str, task: str) -> dict:
 
     name, sci, aliases = c["name"], c.get("scientific_name") or None, c.get("aliases") or []
     found = _cached(["name-all", name.strip().lower(), sci, aliases, crop.lower()],
-                    lambda: retrieve(name, crop=crop, scientific_name=sci, aliases=aliases))
+                    lambda: retrieve(name, crop=crop, scientific_name=sci, aliases=aliases, deadline=SOURCE_DEADLINE))
     covers = {src: cfg.get("task") or [] for src, cfg in _load_sources().items()}
     return dict(sorted(found.items(), key=lambda kv: task not in covers.get(kv[0], [])))
+
+
+def _clean_parts(res: dict, crop: str, task: str, description: str) -> list[str]:
+    """--clean-text. Repeats (2026-10-31): EPPO's taxonomy came first for 45% of candidates, 39% of results mentioned the
+    crop, and there were disambiguation pages, wrong entities and USDA grades on non-grade names. So: appearance text
+    (symptoms, damage) first, then identification notes, then taxonomy; text mentioning the crop first within each;
+    disambiguation pages, site boilerplate, Wikipedia pages naming no living thing, and USDA grades unless the task is
+    quality (or not given) are dropped. Nothing is dropped for being about another host."""
+    from agml_agent.symptom_search import crop_names, focus
+
+    crops = crop_names(crop)
+    parts = []
+    for turn, (src, chs) in enumerate(res.items()):
+        for i, ch in enumerate(chs):
+            text, tags = ch["excerpt_text"], set(ch.get("tags") or [])
+            if (DISAMBIGUATION.search(text[:300]) or BOILERPLATE.search(text[:200])
+                    or (src == "wikipedia" and not BIOLOGY.search(text))):
+                continue
+            if src == "usda_ams_grades" and task and task != "quality":
+                continue
+            kind = 0 if tags & APPEARANCE_TAGS else 1 if tags & IDENTIFICATION_TAGS else 2
+            on_crop = any(c in text.lower() for c in crops)
+            parts.append(((kind, not on_crop, i, turn),
+                          f"[{src}] {focus(text, description, PER_CHUNK_CHARS)} (source: {ch['source_url']})"))
+    return [p for _, p in sorted(parts, key=lambda kp: kp[0])]
 
 
 def _join(parts: list[str], limit: int) -> str:
@@ -273,9 +311,12 @@ def run_retrieve(description: str = "", candidates: list | None = None, crop: st
         sections = []
         for c, res in zip(cands, found):
             res = {src: [ch for ch in chs if not LEAK.search(ch["excerpt_text"])] for src, chs in res.items()}
-            # sources take turns (first chunk of each, then second...), task-matching sources first
-            chunks = [f"[{src}] {focus(chs[i]['excerpt_text'], description, PER_CHUNK_CHARS)} (source: {chs[i]['source_url']})"
-                      for i in range(max(map(len, res.values()), default=0)) for src, chs in res.items() if i < len(chs)]
+            if CLEAN_TEXT:
+                chunks = _clean_parts(res, crop, task, description)
+            else:
+                # sources take turns (first chunk of each, then second...), task-matching sources first
+                chunks = [f"[{src}] {focus(chs[i]['excerpt_text'], description, PER_CHUNK_CHARS)} (source: {chs[i]['source_url']})"
+                          for i in range(max(map(len, res.values()), default=0)) for src, chs in res.items() if i < len(chs)]
             body = _join(chunks, RESULT_CHARS // len(cands)) or (
                 f"No results found for {c['name']!r}. Try its scientific name or aliases, or another candidate.")
             sections.append(f"## {c['name']}\n{body}")
@@ -352,7 +393,8 @@ class HarnessMethod(VLMMethod):
         return {**super().config(), "name": self.name, "harness": "exploit", "tools": self.tools,
                 "max_tool_calls": self.max_tool_calls, "retrieve_mode": self.retrieve_mode, "agml_agent": importlib.metadata.version("agml-agent"),
                 "agml_agent_git": _git_sha(Path(__file__).parent), "agbench_commit": _agbench_commit(),
-                "retrieve_cache": str(cache.CACHE.path) if cache.CACHE else None, "live_search": scrape.LIVE_SEARCH}
+                "retrieve_cache": str(cache.CACHE.path) if cache.CACHE else None, "live_search": scrape.LIVE_SEARCH,
+                "clean_text": CLEAN_TEXT}
 
     async def _create(self, **kw):
         err = None
@@ -507,11 +549,14 @@ def run(args: argparse.Namespace) -> Path:
     load_dotenv()
     cache.CACHE = None if args.no_retrieve_cache else RetrievalCache(args.retrieve_cache or args.out / "retrieve_cache.jsonl")
     scrape.LIVE_SEARCH = not args.no_live_search
+    global CLEAN_TEXT
+    CLEAN_TEXT = args.clean_text
     bench = Benchmark(args.data_dir, args.task or None, args.format or None, args.only, args.limit_per_dataset, args.seed)
     print(f"{len(bench.items)} items; {len(bench.skipped)} datasets skipped")
     spec = model_spec(args.model)
     conc = args.concurrency or (spec.get("parallel", 2) if spec["backend"] == "llamacpp" else spec["concurrency"])
-    tag = "tools" if args.retrieve_mode == "description+candidates" else f"tools-{args.retrieve_mode}"
+    tag = ("tools" if args.retrieve_mode == "description+candidates" else f"tools-{args.retrieve_mode}") + (
+        "-clean" if args.clean_text else "")
     rd = args.run_dir or args.out / f"{args.model.replace('/', '__')}__{tag}_{datetime.now():%Y%m%d-%H%M%S}"
     rd.mkdir(parents=True, exist_ok=True)
 
@@ -559,6 +604,9 @@ def main() -> None:
     p.add_argument("--judge-endpoint")
     p.add_argument("--retrieve-cache", type=Path, help="Lookup cache shared across runs (default: <out>/retrieve_cache.jsonl).")
     p.add_argument("--no-retrieve-cache", action="store_true", help="Always look up live.")
+    p.add_argument("--clean-text", action="store_true",
+                   help="Candidate reference text: appearance first, then identification, then taxonomy; text on the crop "
+                        "first; disambiguation pages, off-topic Wikipedia pages and off-task USDA grades dropped.")
     p.add_argument("--no-live-search", action="store_true",
                    help="Web searches (fact-sheet sites) come only from the cache; API sources still look up live. "
                         "Lookups made this way lack fact-sheet pages, so give the run its own --retrieve-cache copy.")
