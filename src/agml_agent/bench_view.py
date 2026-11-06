@@ -160,13 +160,19 @@ def app() -> None:
     parser.add_argument("--data-dir", default=None)
     args, _ = parser.parse_known_args()
 
-    @st.cache_data(ttl=60)
+    @st.cache_data(ttl=600)
     def runs() -> list[dict]:
         return load_runs(args.runs)
 
-    @st.cache_data(ttl=60)
     def frame(run_dir: str) -> pd.DataFrame:
-        """Predictions joined with the last trace per item (a resumed run may have retried an item)."""
+        """Predictions joined with the last trace per item (a resumed run may have retried an item). Cached until the
+        run's files change: a full run takes minutes to load."""
+        stamp = tuple(f.stat().st_mtime for f in (Path(run_dir) / "predictions.jsonl", Path(run_dir) / "traces.jsonl")
+                      if f.exists())
+        return _frame(run_dir, stamp)
+
+    @st.cache_data(show_spinner="Loading run (a full run takes a few minutes the first time)...", max_entries=8)
+    def _frame(run_dir: str, stamp: tuple) -> pd.DataFrame:  # stamp: part of the cache key
         p = pd.DataFrame(read_jsonl(Path(run_dir) / "predictions.jsonl"))
         if not len(p):
             return p
