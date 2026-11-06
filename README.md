@@ -141,6 +141,9 @@ uv run agml-agent-bench ... --run-dir runs/<run>                                
     is quality. `--clean-text 2` also shows Wikipedia's appearance sections (Symptoms, Description...) and shrinks
     taxonomy to name lines (scientific name, common names, synonyms).
   - `--check-options`: on multiple choice, every answer option is looked up, then the model's own candidates (up to 6).
+  - `--tidy-names`: candidate names are cleaned before lookup (dataset-label form `Crop___Disease`, brackets as
+    aliases, underscores and hyphens, a trailing plant part, a repeated first word); the name as given stays an alias.
+  - `--crop-from-prompt`: a call without `crop` gets the item's crop when the prompt names it.
   - `--keep-healthy` (`crosscheck-look-first`): a first answer that finds no problem gets a second look without the
     tool, kept unless the image clearly shows a problem (vivid symptom text talked healthy plants into problems).
   - With `--clean-text 2`, EPPO, GBIF and Catalogue of Life names and hosts for a disease's common name (e.g.

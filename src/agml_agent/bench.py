@@ -247,6 +247,14 @@ KB_TAGS = {"symptom": ["symptom", "identification"], "life_cycle": ["life_cycle"
 # --check-options: on multiple choice, every answer option is looked up, then the model's own candidates while there is
 # room. Look-first runs (2026-11-02): the model checked every option in 21% of calls and the correct one in 58%.
 CHECK_OPTIONS = False
+# --tidy-names: candidate names cleaned before lookup (shown to the model as given). Full run (2026-11-06): 14% of
+# 97,059 lookups found nothing, many for names in dataset-label form: the crop in front ("Tomato Tomato mosaic virus"),
+# a plant part ("Leaf spot on Leaves"), a code or second name in brackets ("Echinochloa crus-galli (ECHCG)"),
+# underscores and hyphens ("kalanchoe-pinnata"). The name as given stays as the last alias.
+TIDY_NAMES = False
+# --crop-from-prompt: a call without `crop` gets the item's crop when the prompt names it (21% of calls had none);
+# nothing the model was not already shown.
+CROP_FROM_PROMPT = False
 MAX_WITH_OPTIONS = 6
 NOT_OPTIONS = {"none of the above", "i don't know"}
 # --clean-text: what each candidate's reference text shows, and in what order (see _clean_parts). 0: as looked up;
@@ -292,6 +300,27 @@ def _lookup(c: dict, crop: str, task: str) -> dict:
     covers = {src: cfg.get("task") or [] for src, cfg in _load_sources().items()}
     covers["local_kb"] = ["disease", "pest", "species", "quality"]
     return dict(sorted(found.items(), key=lambda kv: task not in covers.get(kv[0], [])))
+
+
+def tidy_name(c: dict, crop: str = "") -> dict:
+    """The candidate with its name cleaned for lookup: in dataset-label form ("Pepper,_bell___Bacterial_spot") only the
+    part after the last "___"; underscores, commas and hyphens between words become spaces; text in brackets becomes
+    an alias; a trailing plant part ("on leaves") and a repeated first word ("Tomato Tomato mosaic virus") are dropped.
+    A crop word that is part of the name ("Banana bunchy top", "Coffee leaf rust") stays. The name as given is kept as
+    the last alias."""
+    orig = c["name"]
+    name = re.sub(r"[_,]+", " ", orig.rsplit("___", 1)[-1] if "___" in orig else orig)
+    brackets = [b.strip() for b in re.findall(r"\(([^)]*)\)", name) if b.strip()]
+    name = re.sub(r"\([^)]*\)", " ", name)
+    name = re.sub(r"(?<=[A-Za-z])-(?=[A-Za-z]{3})", " ", name)        # kalanchoe-pinnata, not "K-1" codes
+    name = re.sub(r"(?<=[a-z]{3})-[A-Za-z]{1,2}$", "", name.strip())  # label suffixes: "aphids-p", "potasium-K"
+    name = re.sub(r"\s+on (the )?(leaves|leaf|fruits?|stems?|plants?|pods?)\s*$", "", name.strip(), flags=re.I)
+    words = name.split()
+    while len(words) > 2 and words[0].lower() == words[1].lower():
+        words = words[1:]
+    name = " ".join(words).strip() or orig
+    aliases = list(dict.fromkeys([*(c.get("aliases") or []), *brackets, *([orig] if name != orig else [])]))
+    return {**c, "name": name, "aliases": aliases}
 
 
 def with_options(candidates, options: list[str]) -> list:
@@ -397,11 +426,12 @@ def run_retrieve(description: str = "", candidates: list | None = None, crop: st
 
     cands = [{"name": c} if isinstance(c, str) else c for c in candidates or []]
     cands = [c for c in cands if isinstance(c, dict) and c.get("name")][:max_candidates]
+    looked_up = [tidy_name(c, crop) for c in cands] if TIDY_NAMES else cands
     if not description and not cands:
         return "error: give a description of what you see and/or candidates (names) to check."
     if cands:
         with ThreadPoolExecutor(len(cands)) as ex:
-            found = list(ex.map(lambda c: _lookup(c, crop, task), cands))
+            found = list(ex.map(lambda c: _lookup(c, crop, task), looked_up))
         sections = []
         for c, res in zip(cands, found):
             res = {src: [ch for ch in chs if not LEAK.search(ch["excerpt_text"])] for src, chs in res.items()}
@@ -489,6 +519,7 @@ class HarnessMethod(VLMMethod):
                 "agml_agent_git": _git_sha(Path(__file__).parent), "agbench_commit": _agbench_commit(),
                 "retrieve_cache": str(cache.CACHE.path) if cache.CACHE else None, "live_search": scrape.LIVE_SEARCH,
                 "clean_text": CLEAN_TEXT, "check_options": CHECK_OPTIONS, "keep_healthy": KEEP_HEALTHY,
+                "tidy_names": TIDY_NAMES, "crop_from_prompt": CROP_FROM_PROMPT,
                 "kb": str(KB_INDEX.path) if KB_INDEX is not None else None}
 
     async def _create(self, **kw):
@@ -502,10 +533,13 @@ class HarnessMethod(VLMMethod):
                     await asyncio.sleep(2 ** attempt * 5)
         return None, err
 
-    async def _call_tool(self, name: str, raw_args: str, options: list[str] = ()) -> tuple[str, float]:
+    async def _call_tool(self, name: str, raw_args: str, options: list[str] = (), item: EvalItem | None = None) -> tuple[str, float]:
         t0 = time.perf_counter()
         try:
             args = json.loads(raw_args or "{}")
+            if (name == "retrieve" and CROP_FROM_PROMPT and isinstance(args, dict) and not args.get("crop") and item
+                    and item.crop and item.crop.lower() in (item.prompt or "").lower()):
+                args["crop"] = item.crop
             if name == "retrieve" and self.retrieve_mode == "candidates":
                 args.pop("description", None)  # not offered in this mode
             if name == "retrieve" and self.retrieve_mode == "crosscheck-assess":
@@ -581,7 +615,7 @@ class HarnessMethod(VLMMethod):
             for c in calls:
                 if n_calls < self.max_tool_calls:
                     n_calls += 1
-                    result, dt = await self._call_tool(c.function.name, c.function.arguments, item.choices or [])
+                    result, dt = await self._call_tool(c.function.name, c.function.arguments, item.choices or [], item)
                     used.append(c.function.name)
                 else:
                     result, dt = "error: tool-call budget used up; answer now", 0.0
@@ -649,8 +683,9 @@ def run(args: argparse.Namespace) -> Path:
     load_dotenv()
     cache.CACHE = None if args.no_retrieve_cache else RetrievalCache(args.retrieve_cache or args.out / "retrieve_cache.jsonl")
     scrape.LIVE_SEARCH = not args.no_live_search
-    global CLEAN_TEXT, CHECK_OPTIONS, KB_INDEX, KEEP_HEALTHY
+    global CLEAN_TEXT, CHECK_OPTIONS, KB_INDEX, KEEP_HEALTHY, TIDY_NAMES, CROP_FROM_PROMPT
     CLEAN_TEXT, CHECK_OPTIONS, KEEP_HEALTHY = args.clean_text, args.check_options, args.keep_healthy
+    TIDY_NAMES, CROP_FROM_PROMPT = args.tidy_names, args.crop_from_prompt
     if args.kb:
         from agml_agent.kb import KB
         KB_INDEX = KB(args.kb)
@@ -660,7 +695,8 @@ def run(args: argparse.Namespace) -> Path:
     conc = args.concurrency or (spec.get("parallel", 2) if spec["backend"] == "llamacpp" else spec["concurrency"])
     tag = ("tools" if args.retrieve_mode == "description+candidates" else f"tools-{args.retrieve_mode}") + (
         {0: "", 1: "-clean", 2: "-clean2"}[args.clean_text] + ("-options" if args.check_options else "") + ("-kb" if args.kb else "") + (
-        "-keephealthy" if args.keep_healthy else ""))
+        "-keephealthy" if args.keep_healthy else "") + ("-tidy" if args.tidy_names else "") + (
+        "-crop" if args.crop_from_prompt else ""))
     rd = args.run_dir or args.out / f"{args.model.replace('/', '__')}__{tag}_{datetime.now():%Y%m%d-%H%M%S}"
     rd.mkdir(parents=True, exist_ok=True)
 
@@ -714,6 +750,11 @@ def main() -> None:
                         "2: also Wikipedia's appearance sections (Symptoms, Description...) and taxonomy as name lines."),
     p.add_argument("--check-options", action="store_true",
                    help=f"On multiple choice, look up every answer option, then the model's candidates (up to {MAX_WITH_OPTIONS}).")
+    p.add_argument("--tidy-names", action="store_true",
+                   help="Clean candidate names before lookup (crop prefix, brackets, underscores, plant part); the name "
+                        "as given stays an alias.")
+    p.add_argument("--crop-from-prompt", action="store_true",
+                   help="A call without crop gets the item's crop when the prompt names it.")
     p.add_argument("--keep-healthy", action="store_true",
                    help="crosscheck-look-first: a first answer that finds no problem gets a second look without the tool, "
                         "kept unless the image clearly shows a problem.")

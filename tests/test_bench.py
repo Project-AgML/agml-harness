@@ -86,7 +86,7 @@ def _args(data_dir, tmp_path, endpoint, **kw):
     a = dict(data_dir=data_dir, model="google/gemma-4-12B-it", endpoint=endpoint, tools=["retrieve"], max_tool_calls=4,
              task=None, format=["mcqa_within"], only="tomato", limit_per_dataset=None, concurrency=4, thinking=True,
              reasoning_effort="low", max_tokens=None, max_model_len=None, seed=0, out=tmp_path / "runs", run_dir=None,
-             judge=False, judge_endpoint=None, retrieve_cache=None, no_retrieve_cache=False, no_live_search=False, clean_text=False, check_options=False, kb=None, keep_healthy=False,
+             judge=False, judge_endpoint=None, retrieve_cache=None, no_retrieve_cache=False, no_live_search=False, clean_text=False, check_options=False, kb=None, keep_healthy=False, tidy_names=False, crop_from_prompt=False,
              retrieve_mode="description+candidates")
     return argparse.Namespace(**{**a, **kw})
 
@@ -282,6 +282,23 @@ def test_disease_names_on_another_host_are_not_shown(monkeypatch):
     assert parts == ["[eol] Fusarium wilt causes yellowing (source: u)"]
     parts = bench._clean_parts(res, "", "species", "", {"name": "sarpagandha"})  # organism names keep their names line
     assert parts[0].startswith("[names: eppo]")
+
+
+@pytest.mark.parametrize("given,name", [("Tomato___Tomato_mosaic_virus", "Tomato mosaic virus"),
+                                        ("Pepper,_bell___Bacterial_spot", "Bacterial spot"), ("Leaf spot on Leaves", "Leaf spot"),
+                                        ("Matricaria chamomilla (Scented Mayweed)", "Matricaria chamomilla"),
+                                        ("kalanchoe-pinnata", "kalanchoe pinnata"), ("aphids-p", "aphids"),
+                                        ("Banana Bunchy Top", "Banana Bunchy Top"), ("BARI-4", "BARI-4")])
+def test_tidy_name(given, name):
+    got = bench.tidy_name({"name": given})
+    assert got["name"] == name and (name == given or got["aliases"][-1] == given)
+
+
+def test_crop_from_prompt_fills_a_missing_crop(data_dir, tmp_path, fake_server, monkeypatch):
+    endpoint, calls = fake_server
+    monkeypatch.setitem(globals(), "ARGS", {"description": "dark lesions", "candidates": [{"name": "late blight"}]})
+    bench.run(_args(data_dir, tmp_path, endpoint, crop_from_prompt=True, limit_per_dataset=1))
+    assert calls[0].get("crop") == "tomato"  # the prompt names the crop: "...image of a tomato plant"
 
 
 def test_agml_tools_are_not_allowed():

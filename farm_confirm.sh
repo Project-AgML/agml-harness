@@ -31,6 +31,8 @@ for i in $(seq "$REPEATS"); do
             look-first) uv run --extra bench agml-agent-bench "${COMMON[@]}" "${HARNESS[@]}" --out $OUT/look-first$SUFFIX ;;
             kb-keep-healthy) uv run --extra bench agml-agent-bench "${COMMON[@]}" "${HARNESS[@]}" --clean-text 2 --check-options \
                 --kb kb --keep-healthy --out $OUT/kb-keep-healthy$SUFFIX ;;
+            kb-tidy) uv run --extra bench agml-agent-bench "${COMMON[@]}" "${HARNESS[@]}" --clean-text 2 --check-options \
+                --kb kb --keep-healthy --tidy-names --crop-from-prompt --out $OUT/kb-tidy$SUFFIX ;;
             *) echo "unknown arm $arm"; exit 1 ;;
         esac
     done
