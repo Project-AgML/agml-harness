@@ -74,3 +74,76 @@ def test_viewer_checks_relevance_and_use_of_kb_sections():
     assert len(rows) == 1 and rows[0]["page is the candidate"] and rows[0]["appearance section"] and rows[0]["names crop"]
     assert rows[0]["correct class"] and rows[0]["used"]
     assert bench_view.source_use(trace) == (["local_kb", "names"], ["local_kb"])
+
+
+def _names_kb(tmp_path, monkeypatch):
+    monkeypatch.setattr(kb, "sites", lambda: {"usda_plants": {"parse": "names_plants"}})
+    d = tmp_path / "raw" / "usda_plants"
+    (d / "files").mkdir(parents=True)
+    (d / "pages.jsonl").write_text('{"url": "x", "file": "plantlst.txt"}\n')
+    (d / "files" / "plantlst.txt").write_text(
+        '"Symbol","Synonym Symbol","Scientific Name with Author","Common Name","Family"\n'
+        '"SOLY2","","Solanum lycopersicum L.","garden tomato","Solanaceae"\n'
+        '"SOLY2","LYES","Lycopersicon esculentum Mill.","","Solanaceae"\n')
+    kb.build_names(tmp_path)
+    return tmp_path
+
+
+def test_names_table_resolves_synonyms_and_common_names(tmp_path, monkeypatch):
+    root = _names_kb(tmp_path, monkeypatch)
+    got = kb.Names(root).lookup("Lycopersicon esculentum")
+    assert got["scientific_name"] == "Solanum lycopersicum" and got["common_names"] == ["garden tomato"]
+    assert got["family"] == "Solanaceae" and "Lycopersicon esculentum" in got["synonyms"]
+    assert kb.Names(root).lookup("healthy") is None and kb.Names(root).lookup("unknown thing") is None
+
+
+def test_kb_only_lookup_uses_local_names_and_kb_only(tiny_kb, tmp_path, monkeypatch):
+    kb.build(tiny_kb)
+    monkeypatch.setattr(bench, "KB_INDEX", kb.KB(tiny_kb))
+    monkeypatch.setattr(bench, "KB_ONLY", True)
+    monkeypatch.setattr(bench, "NAMES", None)
+    import agml_agent.retrieve as r
+    monkeypatch.setattr(r, "retrieve", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no live lookups")))
+    found = bench._lookup({"name": "coffee leaf rust"}, "coffee", "disease")
+    assert list(found) == ["local_kb"]
+
+
+def test_block_network_allows_only_this_machine(monkeypatch):
+    import socket
+    monkeypatch.setattr(socket.socket, "connect", socket.socket.connect)
+    bench._block_network()
+    s = socket.socket()
+    with pytest.raises(RuntimeError, match="kb-only"):
+        s.connect(("93.184.216.34", 80))
+    s.close()
+
+
+def test_cfr_sections_are_titled_by_subpart(tmp_path):
+    import zipfile
+    xml = """<CFRDOC><PART><HD>PART 51—FRESH FRUITS, VEGETABLES AND OTHER PRODUCTS</HD><SUBPART>
+<HD SOURCE="HED">Subpart—United States Standards for Grades of Apples</HD>
+<SECTION><SECTNO>§ 51.301</SECTNO><SUBJECT>U.S. Extra Fancy.</SUBJECT><P>U.S. Extra Fancy consists of apples of one
+variety which are mature but not overripe, carefully hand picked, clean, fairly well formed, free from decay.</P></SECTION>
+</SUBPART></PART><PART><HD>PART 1—ADMINISTRATIVE</HD><SECTION><SECTNO>§ 1.1</SECTNO><SUBJECT>Scope.</SUBJECT>
+<P>Not a grade standard, so not indexed even though this paragraph is long enough to be a section here.</P></SECTION></PART></CFRDOC>"""
+    with zipfile.ZipFile(tmp_path / "t.zip", "w") as z:
+        z.writestr("CFR-2025-title7-vol2.xml", xml)
+    rows = kb.cfr_sections(tmp_path / "t.zip")
+    assert len(rows) == 1 and rows[0]["title"] == "United States Standards for Grades of Apples"
+    assert rows[0]["heading"].startswith("§ 51.301") and "hand picked" in rows[0]["text"]
+
+
+def test_pdf_markdown_finds_headings_and_drops_running_headers():
+    import shutil, subprocess
+    if not shutil.which("pdftotext"):
+        pytest.skip("poppler not installed")
+    fake = "EPPO Bulletin 2020\n\nSYMPTOMS\nLeaves show small brown spots that\nenlarge and merge.\n\fEPPO Bulletin 2020\n\nHOSTS\nPear.\n\fEPPO Bulletin 2020\nend\n"
+    import agml_agent.kb as k
+    real = subprocess.run
+    monkey = lambda *a, **kw: type("R", (), {"stdout": fake.encode()})()
+    try:
+        subprocess.run = monkey
+        title, md = k.pdf_markdown(b"%PDF-")
+    finally:
+        subprocess.run = real
+    assert "# Symptoms" in md and "small brown spots that enlarge and merge." in md and "EPPO Bulletin" not in md

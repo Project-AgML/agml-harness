@@ -102,7 +102,8 @@ def kb_sections(trace: list | None, answer: str = "") -> list[dict]:
                 title, _, heading = head.partition(" > ")
                 c, low = _norm(cand), _norm(head)
                 page = _norm(re.sub(r"\|.*$", "", title))  # title without "| NC State Extension Publications"
-                rows.append({"candidate": cand, "crop": crop, "title": title, "heading": heading, "text": text, "url": url,
+                rows.append({"candidate": cand, "crop": crop, "site": re.sub(r"^https?://(www\.)?([^/]+).*$", r"\2", url),
+                             "title": title, "heading": heading, "text": text, "url": url,
                              "names candidate": bool(c) and c in low,
                              "page is the candidate": bool(c) and (page == c or page.startswith(c + " ") and len(page) <= len(c) + 25
                                                                    and not re.search(r"\b(moth|beetle|weevil|borer|mite|aphid)\b", page[len(c):])),
@@ -117,7 +118,8 @@ def kb_summary(p) -> dict:
     """Knowledge-base relevance and use over one run's frame (rows of predictions with `trace` and `gt`)."""
     import pandas as pd
 
-    rows = [dict(r, item_id=i, score=sc) for i, t, gt, sc in zip(p["item_id"], p["trace"], p["gt"], p["score"])
+    ag = p["ag_task"] if "ag_task" in p else [""] * len(p)
+    rows = [dict(r, item_id=i, score=sc, ag_task=a) for i, t, gt, sc, a in zip(p["item_id"], p["trace"], p["gt"], p["score"], ag)
             for r in kb_sections(t, str(gt))]
     calls = sum(1 for t in p.trace for s in (t or []) if s.get("role") == "tool")
     k = pd.DataFrame(rows)
@@ -159,6 +161,9 @@ def app() -> None:
     parser.add_argument("--runs", nargs="+", required=True)
     parser.add_argument("--data-dir", default=None)
     args, _ = parser.parse_known_args()
+    split = st.sidebar.radio("Split tables by", ["ag task", "cv task"], help="Agricultural task (disease, pest/damage, "
+                             "species, quality/maturity, ...) or computer-vision task (format: open-ended, multiple choice, ...)")
+    by = {"ag task": "ag_task", "cv task": "cv"}[split]
 
     @st.cache_data(ttl=600)
     def runs() -> list[dict]:
@@ -227,17 +232,17 @@ def app() -> None:
         for r in harness:
             p = frame(r["dir"])
             st.subheader(r["name"])
-            st.markdown("**By CV task**")
-            st.dataframe(pd.DataFrame([usage_row(k, g) for k, g in p.groupby("cv")]).rename(columns={"run": "cv task"}),
+            st.markdown(f"**By {split}**")
+            st.dataframe(pd.DataFrame([usage_row(k, g) for k, g in p.groupby(by)]).rename(columns={"run": split}),
                          hide_index=True, width="stretch")
             bs = base_scores()
             for b in bs.columns:
-                j = p.set_index("item_id")[["score", "n_tool_calls", "cv"]].join(bs[b].rename("base"), how="inner")
+                j = p.set_index("item_id")[["score", "n_tool_calls", by]].join(bs[b].rename("base"), how="inner")
                 if not len(j):
                     continue
                 j["fixed"], j["broken"] = (j.base < 0.5) & (j.score >= 0.5), (j.base >= 0.5) & (j.score < 0.5)
                 st.markdown(f"**vs {b}** ({len(j)} shared items): fixed = baseline wrong, harness right; broken = the reverse")
-                t = j.groupby("cv").agg(items=("score", "size"), baseline=("base", "mean"), harness=("score", "mean"),
+                t = j.groupby(by).agg(items=("score", "size"), baseline=("base", "mean"), harness=("score", "mean"),
                                         fixed=("fixed", "sum"), broken=("broken", "sum"),
                                         fixed_with_tools=("fixed", lambda s: int((s & (j.loc[s.index, "n_tool_calls"] > 0)).sum())))
                 t["baseline"], t["harness"] = (t.baseline * 100).round(1), (t.harness * 100).round(1)
@@ -286,12 +291,13 @@ def app() -> None:
                                                  "score (shown, %)": round(j.score[quiet].mean() * 100, 1) if quiet.any() else None}])])
             st.dataframe(t, hide_index=True, width="stretch")
             if "base" in j and len(t) > 1:
-                st.markdown("**By CV task** (items where the source was used)")
-                by = [{"cv task": cv, "source": src, "items": int(m.sum()), "fixed": int(g.fixed[m].sum()),
-                       "broken": int(g.broken[m].sum())}
-                      for cv, g in j.groupby("cv") for src in sorted({x for xs in g.sources_used for x in xs})
+                st.markdown(f"**By {split}** (items where the source was used; shown = items where it was shown)")
+                rows_by = [{split: grp, "source": src, "items shown": int(g.sources_shown.map(lambda xs, s=src: s in xs).sum()),
+                       "items used": int(m.sum()), "fixed": int(g.fixed[m].sum()), "broken": int(g.broken[m].sum()),
+                       "net": int(g.fixed[m].sum() - g.broken[m].sum())}
+                      for grp, g in j.groupby(by) for src in sorted({x for xs in g.sources_used for x in xs})
                       if (m := g.sources_used.map(lambda xs, s=src: s in xs)).any()]
-                st.dataframe(pd.DataFrame(by), hide_index=True, width="stretch")
+                st.dataframe(pd.DataFrame(rows_by), hide_index=True, width="stretch")
 
     def page_kb():
         st.title("Knowledge base")
@@ -310,28 +316,48 @@ def app() -> None:
             o, _ = kb_summary(frame(r["dir"]))
             summ.append({"run": f"{r['name']} · {Path(r['dir']).name}", **o})
         st.dataframe(pd.DataFrame(summ), hide_index=True, width="stretch")
-        st.markdown("**Use by source** (share of items where a source was shown and then used)")
+        st.markdown(f"**By {split} and site** (sections shown; share that name the candidate and that were used)")
+        rows = []
+        for r in runs_kb:
+            _, k = kb_summary(frame(r["dir"]))
+            col = "ag_task" if by == "ag_task" else None
+            if col is None:
+                cv = frame(r["dir"]).set_index("item_id")["cv"]
+                k = k.assign(cv=k.item_id.map(cv))
+                col = "cv"
+            for (grp, site), g in k.groupby([col, "site"]):
+                rows.append({"run": Path(r["dir"]).name, split: grp, "site": site, "items": g.item_id.nunique(),
+                             "sections": len(g), "names candidate (%)": round(g["names candidate"].mean() * 100, 1),
+                             "correct class (%)": round(g["correct class"].mean() * 100, 1),
+                             "used (%)": round(g.used.mean() * 100, 1),
+                             "items used": g[g.used].item_id.nunique()})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        st.markdown(f"**Use by source and {split}** (all sources, local and live: items where a source was shown, "
+                    "and the share where it was then used)")
         rows = []
         for r in harness:
             p = frame(r["dir"])
             if "sources_shown" not in p:
                 continue
-            for src in sorted({x for xs in p.sources_shown for x in xs}):
-                shown = p.sources_shown.map(lambda xs: src in xs)
-                used = p.sources_used.map(lambda xs: src in xs)
-                rows.append({"run": Path(r["dir"]).name, "source": src, "items shown": int(shown.sum()),
-                             "used (%)": round(used[shown].mean() * 100, 1)})
+            for grp, g in p.groupby(by):
+                for src in sorted({x for xs in g.sources_shown for x in xs}):
+                    shown = g.sources_shown.map(lambda xs: src in xs)
+                    used = g.sources_used.map(lambda xs: src in xs)
+                    rows.append({"run": Path(r["dir"]).name, split: grp, "source": src, "items shown": int(shown.sum()),
+                                 "items used": int(used[shown].sum()), "used (%)": round(used[shown].mean() * 100, 1)})
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
         names = {f"{r['name']} · {Path(r['dir']).name}": r["dir"] for r in runs_kb}
-        c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
+        c1, c0, c2, c3, c4 = st.columns([3, 1, 1, 1, 1])
         _, k = kb_summary(frame(names[c1.selectbox("Run", list(names))]))
+        if (task := c0.selectbox("ag task", ["all", *sorted(k.ag_task.dropna().unique())] if len(k) else ["all"])) != "all":
+            k = k[k.ag_task == task]
         filt = {c: col.selectbox(c, ["all", "yes", "no"], key=c)
                 for col, c in zip((c2, c3, c4), ["page is the candidate", "correct class", "used"])}
         for c, f in filt.items():
             if f != "all":
                 k = k[k[c] == (f == "yes")]
         st.caption(f"{len(k)} sections")
-        st.dataframe(k[["item_id", "candidate", "crop", "title", "heading", "names candidate", "page is the candidate",
+        st.dataframe(k[["item_id", "ag_task", "site", "candidate", "crop", "title", "heading", "names candidate", "page is the candidate",
                         "names crop", "appearance section", "correct class", "used", "text", "url"]],
                      hide_index=True, width="stretch", height=600)
 

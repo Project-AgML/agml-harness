@@ -1,13 +1,25 @@
-# Sites downloaded into the local knowledge base (agml-agent-kb crawl). Only sites whose robots.txt allows us:
-# checked 2026-11-03. Left out: PlantVillage, PNW Handbooks, APS Education Center and ProMusa (robots.txt blocks
-# ClaudeBot and other AI crawlers); TNAU Agritech (did not answer); Bugwood (its own site is news, its subject pages
-# are image databases). The crawler obeys robots.txt and Crawl-delay, waits at least 1 s between requests to a site
+# Sites downloaded into the local knowledge base (agml-agent-kb crawl). Only sites whose robots.txt allows us and that
+# have no bot protection: checked 2026-11-03 and 2026-11-09. Left out:
+#   robots.txt blocks AI crawlers: PlantVillage, PNW Handbooks, APS Education Center, ProMusa, SCA (coffee grading)
+#   bot protection (access denied / browser challenge / proof of work): USDA AMS (ams.usda.gov; the same grade
+#     standards are taken from 7 CFR on govinfo.gov), GBIF website (the backbone download server is open),
+#     Catalogue of Life (website and download server; the GBIF backbone includes most of its names), UNECE standards,
+#     BBCH monograph (openagrar.de)
+#   robots.txt disallows the content: OECD brochures (/content/dam/), Codex standards (list API and workspace.fao.org),
+#     EPPO API and data-download hosts (api.eppo.int, data.eppo.int; the public gd.eppo.int pages are crawled)
+#   little text: Bugwood (bugwood.org is news; its image databases render in the browser, no page text)
+#   by decision: Wikipedia (large; kept as a live source outside --kb-only), EOL (its text is mostly Wikipedia),
+#     iNaturalist (descriptions are Wikipedia excerpts) The crawler obeys robots.txt and Crawl-delay, waits at least 1 s between requests to a site
 # (or `delay`), and downloads HTML pages only.
 #
 #   allow / deny   regexes a URL must / must not match
 #   sitemaps       sitemap URLs (indexes are followed); start: start pages
 #   follow         also follow links found on pages (default true); follow_from: only on pages matching this regex
-#   max_pages      stop after this many HTML pages
+#   max_pages      stop after this many HTML pages (and PDFs)
+#   documents      also download PDFs linked from allowed pages (text extracted with pdftotext at build)
+#   files          fixed downloads instead of a crawl (data dumps), saved as they are under raw/<site>/files/
+#   parse          how `build` reads the site: html (default; PDFs by type), cfr (US Code of Federal Regulations XML),
+#                  names_gbif / names_plants / names_eppo (rows of the names table, not text sections)
 sites:
   - name: ucipm
     robots: https://ipm.ucanr.edu/robots.txt
@@ -41,3 +53,55 @@ sites:
     # literature references and nutrient tables (17,000 pages at the site's 10 s crawl delay, 2026-11-03)
     follow_from: 'content/feeds\?category=All'
     max_pages: 3000
+
+  - name: tnau
+    robots: https://agritech.tnau.ac.in/robots.txt
+    start: [https://agritech.tnau.ac.in/index.html]
+    allow: '^https?://agritech\.tnau\.ac\.in/'
+    https: true
+    https: true
+    deny: '\?|/(tamil|ta|ta_)/|/(images|img|photos?)/'
+    documents: true
+    max_pages: 40000
+
+  # EPPO Global Database, public pages only: datasheets (HTML and PDF) and EPPO standards, among them the PM 7
+  # diagnostic protocols (symptoms, identification)
+  - name: eppo_docs
+    robots: https://gd.eppo.int/robots.txt
+    start: [https://gd.eppo.int/datasheets/, https://gd.eppo.int/standards/PM1/, https://gd.eppo.int/standards/PM3/,
+            https://gd.eppo.int/standards/PM4/, https://gd.eppo.int/standards/PM5/, https://gd.eppo.int/standards/PM6/,
+            https://gd.eppo.int/standards/PM7/, https://gd.eppo.int/standards/PM8/, https://gd.eppo.int/standards/PM9/,
+            https://gd.eppo.int/standards/PM10/]
+    allow: '^https://gd\.eppo\.int/(datasheets/$|standards/PM\d+/$|taxon/[A-Z0-9]+/datasheet$|download/(doc|standard)/[^?]+\.pdf$)'
+    follow_from: 'gd\.eppo\.int/(datasheets|standards)/'
+    deny: '_(fr|de|es|ru|it)\.pdf$|-(fr|de|es|ru|it)\.pdf$'   # English versions only
+    documents: true
+    max_pages: 5000
+
+  # EPPO taxon pages: preferred name, other scientific names, common names in many languages, taxonomy -> names table
+  - name: eppo_taxa
+    robots: https://gd.eppo.int/robots.txt
+    sitemaps: [https://gd.eppo.int/sitemaps/sitemap_taxon1.xml.gz, https://gd.eppo.int/sitemaps/sitemap_taxon2.xml.gz]
+    allow: '^https://gd\.eppo\.int/taxon/[A-Z0-9]+$'
+    follow: false
+    parse: names_eppo
+    max_pages: 150000
+
+  # US grade standards (fresh and processed fruits and vegetables, grain): Title 7 of the Code of Federal Regulations,
+  # GovInfo bulk data. Parts 51, 52 and 810 are indexed (one section per CFR section, titled by its subpart).
+  - name: cfr_title7
+    robots: https://www.govinfo.gov/robots.txt
+    files: [https://www.govinfo.gov/bulkdata/CFR/2025/title-7/CFR-2025-title-7.zip]
+    parse: cfr
+
+  # GBIF Backbone Taxonomy: all names (accepted, synonyms) and vernacular names -> names table
+  - name: gbif_backbone
+    robots: https://hosted-datasets.gbif.org/robots.txt
+    files: [https://hosted-datasets.gbif.org/datasets/backbone/current/backbone.zip]
+    parse: names_gbif
+
+  # USDA PLANTS complete checklist: symbols, accepted names and synonyms, common names, families -> names table
+  - name: usda_plants
+    robots: https://plants.usda.gov/robots.txt
+    files: [https://plants.usda.gov/DocumentLibrary/Txt/plantlst.txt]
+    parse: names_plants

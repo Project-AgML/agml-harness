@@ -242,6 +242,12 @@ _live = threading.Semaphore(LIVE_LOOKUPS)
 BLOCKED = re.compile(r"plantvillage\.psu\.edu|pnwhandbooks\.org|apsnet\.org|promusa\.org", re.I)
 # --kb: the local knowledge base (kb.py), searched by candidate name next to the API sources; None when not used.
 KB_INDEX = None
+# --kb-only: the local knowledge base and names table are the only sources; no API, web search, Wikipedia or cache,
+# and any connection off this machine raises (so a run cannot quietly use the internet)
+KB_ONLY = False
+NAMES = None
+NAME_URL = {"eppo": "https://gd.eppo.int/taxon/{}", "usda_plants": "https://plants.usda.gov/plant-profile/{}",
+            "gbif": "https://www.gbif.org/species/{}"}
 KB_TAGS = {"symptom": ["symptom", "identification"], "life_cycle": ["life_cycle"], "management": ["management"],
            "other": ["identification"]}
 # --check-options: on multiple choice, every answer option is looked up, then the model's own candidates while there is
@@ -287,6 +293,8 @@ def _lookup(c: dict, crop: str, task: str) -> dict:
     from agml_agent.retrieve import _load_sources, retrieve
 
     name, sci, aliases = c["name"], c.get("scientific_name") or None, c.get("aliases") or []
+    if KB_ONLY:
+        return _local_lookup(name, sci, aliases, crop)
     found = _cached(["name-all", name.strip().lower(), sci, aliases, crop.lower()],
                     lambda: retrieve(name, crop=crop, scientific_name=sci, aliases=aliases, deadline=SOURCE_DEADLINE))
     # cached lookups made before these sites were left out can still hold their pages
@@ -300,6 +308,58 @@ def _lookup(c: dict, crop: str, task: str) -> dict:
     covers = {src: cfg.get("task") or [] for src, cfg in _load_sources().items()}
     covers["local_kb"] = ["disease", "pest", "species", "quality"]
     return dict(sorted(found.items(), key=lambda kv: task not in covers.get(kv[0], [])))
+
+
+def _local_lookup(name: str, sci: str | None, aliases: list, crop: str) -> dict:
+    """--kb-only: the names table resolves the candidate (and its scientific name and aliases) to a taxon; the
+    knowledge base is searched for the name as given, then the scientific names, synonyms and common names found."""
+    info = None
+    if NAMES is not None:
+        for n in [name, sci, *aliases]:
+            if n and (info := NAMES.lookup(n, crop=crop)):
+                break
+        if info and info.get("rank") in ("kingdom", "phylum", "class", "order"):
+            info = None  # "caterpillar" -> Lepidoptera, "fungal spores" -> Fungi: too broad to help
+    terms = [name, sci, *aliases]
+    if info:
+        terms += [info["scientific_name"], *info["synonyms"], *info["common_names"]]
+    found = {}
+    hits = KB_INDEX.search(list(dict.fromkeys(t for t in terms if t)), crop) if KB_INDEX is not None else []
+    if hits:
+        found["local_kb"] = [{"excerpt_text": f"{h['title']} > {h['heading']}: {h['text']}", "source_url": h["url"],
+                              "tags": KB_TAGS[h["kind"]], "raw_response": json.dumps({"site": h["site"]})} for h in hits]
+    if info:
+        group = ", ".join(x for x in (info["kingdom"], info["family"]) if x)
+        syn = [x for x in info["synonyms"] if re.fullmatch(r"[A-Z][a-z]+( [a-z-]+){1,2}", x)][:5]
+        text = "\n".join(x for x in (
+            f"Scientific name: {info['scientific_name']}" + (f" ({group})" if group else ""),
+            info["common_names"] and "English common names: " + ", ".join(info["common_names"][:5]),
+            syn and "Synonyms: " + ", ".join(syn)) if x)
+        found["local_names"] = [{"excerpt_text": text, "tags": ["taxonomy"],
+                                 "source_url": NAME_URL[info["source"]].format(info["id"]),
+                                 "raw_response": json.dumps({"source": info["source"], "id": info["id"]})}]
+    return found
+
+
+def _block_network() -> None:
+    """--kb-only: connections to anything but this machine (the model and judge servers) raise."""
+    import ipaddress
+    import socket
+
+    connect = socket.socket.connect
+
+    def local_only(self, address):
+        host = address[0] if isinstance(address, tuple) else None
+        if host is not None:
+            try:
+                ok = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                ok = host == "localhost"
+            if not ok:
+                raise RuntimeError(f"--kb-only: network access to {address} is not allowed")
+        return connect(self, address)
+
+    socket.socket.connect = local_only
 
 
 def tidy_name(c: dict, crop: str = "") -> dict:
@@ -520,7 +580,9 @@ class HarnessMethod(VLMMethod):
                 "retrieve_cache": str(cache.CACHE.path) if cache.CACHE else None, "live_search": scrape.LIVE_SEARCH,
                 "clean_text": CLEAN_TEXT, "check_options": CHECK_OPTIONS, "keep_healthy": KEEP_HEALTHY,
                 "tidy_names": TIDY_NAMES, "crop_from_prompt": CROP_FROM_PROMPT,
-                "kb": str(KB_INDEX.path) if KB_INDEX is not None else None}
+                "kb": str(KB_INDEX.path) if KB_INDEX is not None else None, "kb_only": KB_ONLY,
+                "kb_manifest": _loads((KB_INDEX.path.parent / "manifest.json").read_text())
+                if KB_INDEX is not None and (KB_INDEX.path.parent / "manifest.json").exists() else None}
 
     async def _create(self, **kw):
         err = None
@@ -681,14 +743,22 @@ def run(args: argparse.Namespace) -> Path:
     from agbench.eval.servers import Server
 
     load_dotenv()
-    cache.CACHE = None if args.no_retrieve_cache else RetrievalCache(args.retrieve_cache or args.out / "retrieve_cache.jsonl")
+    cache.CACHE = None if args.no_retrieve_cache or args.kb_only else RetrievalCache(
+        args.retrieve_cache or args.out / "retrieve_cache.jsonl")
     scrape.LIVE_SEARCH = not args.no_live_search
-    global CLEAN_TEXT, CHECK_OPTIONS, KB_INDEX, KEEP_HEALTHY, TIDY_NAMES, CROP_FROM_PROMPT
+    global CLEAN_TEXT, CHECK_OPTIONS, KB_INDEX, KEEP_HEALTHY, TIDY_NAMES, CROP_FROM_PROMPT, KB_ONLY, NAMES
     CLEAN_TEXT, CHECK_OPTIONS, KEEP_HEALTHY = args.clean_text, args.check_options, args.keep_healthy
     TIDY_NAMES, CROP_FROM_PROMPT = args.tidy_names, args.crop_from_prompt
     if args.kb:
         from agml_agent.kb import KB
         KB_INDEX = KB(args.kb)
+    if args.kb_only:
+        if not args.kb:
+            raise SystemExit("--kb-only needs --kb")
+        from agml_agent.kb import Names
+        KB_ONLY = True
+        NAMES = Names(args.kb) if (args.kb / "names.sqlite").exists() else None
+        _block_network()
     bench = Benchmark(args.data_dir, args.task or None, args.format or None, args.only, args.limit_per_dataset, args.seed)
     print(f"{len(bench.items)} items; {len(bench.skipped)} datasets skipped")
     spec = model_spec(args.model)
@@ -696,7 +766,7 @@ def run(args: argparse.Namespace) -> Path:
     tag = ("tools" if args.retrieve_mode == "description+candidates" else f"tools-{args.retrieve_mode}") + (
         {0: "", 1: "-clean", 2: "-clean2"}[args.clean_text] + ("-options" if args.check_options else "") + ("-kb" if args.kb else "") + (
         "-keephealthy" if args.keep_healthy else "") + ("-tidy" if args.tidy_names else "") + (
-        "-crop" if args.crop_from_prompt else ""))
+        "-crop" if args.crop_from_prompt else "") + ("-kbonly" if args.kb_only else ""))
     rd = args.run_dir or args.out / f"{args.model.replace('/', '__')}__{tag}_{datetime.now():%Y%m%d-%H%M%S}"
     rd.mkdir(parents=True, exist_ok=True)
 
@@ -759,6 +829,9 @@ def main() -> None:
                    help="crosscheck-look-first: a first answer that finds no problem gets a second look without the tool, "
                         "kept unless the image clearly shows a problem.")
     p.add_argument("--kb", type=Path, help="Local knowledge base folder (agml-agent-kb), searched next to the API sources.")
+    p.add_argument("--kb-only", action="store_true",
+                   help="Only the local knowledge base (--kb) and its names table: no API sources, web search, Wikipedia "
+                        "or lookup cache, and connections off this machine raise.")
     p.add_argument("--no-live-search", action="store_true",
                    help="Web searches (fact-sheet sites) come only from the cache; API sources still look up live. "
                         "Lookups made this way lack fact-sheet pages, so give the run its own --retrieve-cache copy.")

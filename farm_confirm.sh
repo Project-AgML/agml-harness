@@ -33,6 +33,8 @@ for i in $(seq "$REPEATS"); do
                 --kb kb --keep-healthy --out $OUT/kb-keep-healthy$SUFFIX ;;
             kb-tidy) uv run --extra bench agml-agent-bench "${COMMON[@]}" "${HARNESS[@]}" --clean-text 2 --check-options \
                 --kb kb --keep-healthy --tidy-names --crop-from-prompt --out $OUT/kb-tidy$SUFFIX ;;
+            kb-only) uv run --extra bench agml-agent-bench "${COMMON[@]}" --retrieve-mode crosscheck-look-first --clean-text 2 \
+                --check-options --kb kb --keep-healthy --kb-only --out $OUT/kb-only$SUFFIX ;;  # local database only, no network
             *) echo "unknown arm $arm"; exit 1 ;;
         esac
     done
