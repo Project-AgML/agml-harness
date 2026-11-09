@@ -246,6 +246,7 @@ KB_INDEX = None
 # and any connection off this machine raises (so a run cannot quietly use the internet)
 KB_ONLY = False
 NAMES = None
+NAME_LABEL = {"eppo": "EPPO", "usda_plants": "USDA PLANTS", "gbif": "GBIF"}
 NAME_URL = {"eppo": "https://gd.eppo.int/taxon/{}", "usda_plants": "https://plants.usda.gov/plant-profile/{}",
             "gbif": "https://www.gbif.org/species/{}"}
 KB_TAGS = {"symptom": ["symptom", "identification"], "life_cycle": ["life_cycle"], "management": ["management"],
@@ -335,10 +336,21 @@ def _local_lookup(name: str, sci: str | None, aliases: list, crop: str) -> dict:
             f"Scientific name: {info['scientific_name']}" + (f" ({group})" if group else ""),
             info["common_names"] and "English common names: " + ", ".join(info["common_names"][:5]),
             syn and "Synonyms: " + ", ".join(syn)) if x)
-        found["local_names"] = [{"excerpt_text": text, "tags": ["taxonomy"],
+        found[NAME_LABEL[info["source"]]] = [{"excerpt_text": text, "tags": ["taxonomy"],
                                  "source_url": NAME_URL[info["source"]].format(info["id"]),
                                  "raw_response": json.dumps({"source": info["source"], "id": info["id"]})}]
     return found
+
+
+def _label(src: str, ch: dict) -> str:
+    """The source tag the model sees: a knowledge-base section names its site ("local_kb: UC IPM"), so the source of
+    every piece of text is visible in the result, not only in the URL."""
+    if src == "local_kb":
+        from agml_agent.kb import site_label
+
+        site = (_loads(ch.get("raw_response") or "{}") or {}).get("site")
+        return f"local_kb: {site_label(site)}" if site else src
+    return src
 
 
 def _block_network() -> None:
@@ -440,7 +452,7 @@ def _clean_parts(res: dict, crop: str, task: str, description: str, cand: dict |
             kind = 0 if tags & APPEARANCE_TAGS else 1 if tags & IDENTIFICATION_TAGS else 2
             on_crop = any(c in text.lower() for c in crops)
             parts.append(((kind, not on_crop, i, turn),
-                          f"[{src}] {focus(text, description, PER_CHUNK_CHARS)} (source: {ch['source_url']})"))
+                          f"[{_label(src, ch)}] {focus(text, description, PER_CHUNK_CHARS)} (source: {ch['source_url']})"))
     if names:
         line = "; ".join(names.values())[:NAME_CHARS]
         parts.append(((-1, False, 0, 0), f"[names: {', '.join(name_srcs)}] {line} (source: {next(iter(name_srcs.values()))})"))
@@ -499,7 +511,7 @@ def run_retrieve(description: str = "", candidates: list | None = None, crop: st
                 chunks = _clean_parts(res, crop, task, description, c)
             else:
                 # sources take turns (first chunk of each, then second...), task-matching sources first
-                chunks = [f"[{src}] {focus(chs[i]['excerpt_text'], description, PER_CHUNK_CHARS)} (source: {chs[i]['source_url']})"
+                chunks = [f"[{_label(src, chs[i])}] {focus(chs[i]['excerpt_text'], description, PER_CHUNK_CHARS)} (source: {chs[i]['source_url']})"
                           for i in range(max(map(len, res.values()), default=0)) for src, chs in res.items() if i < len(chs)]
             body = (_fit(chunks, RESULT_CHARS // len(cands)) if CLEAN_TEXT >= 2 else _join(chunks, RESULT_CHARS // len(cands))) or (
                 f"No results found for {c['name']!r}. Try its scientific name or aliases, or another candidate.")

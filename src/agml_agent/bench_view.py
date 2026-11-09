@@ -53,6 +53,33 @@ def _uses(body: str, earlier: set, later: set) -> bool:
     return len((_shingles(body) & later) - earlier) >= 2
 
 
+TAG = re.compile(r"^\[([a-z_.]+(?::[^\]\n]*)?)\]")
+
+
+def source_list(trace: list | None) -> list[dict]:
+    """Every piece of reference text shown in one item's trace, in order: its source label as the model saw it
+    ("local_kb: UC IPM", "names: GBIF"), page title, URL, and whether the model used it (as in source_use). For the
+    reader: which sources an answer could rest on and which it did."""
+    rows, known, seen = [], _source_names(), set()
+    for i, s in enumerate(trace or []):
+        if s.get("role") != "tool":
+            continue
+        earlier_sh, later_sh, later_low = _turns(trace, i)
+        for m in BLOCK.finditer(str(s.get("result", ""))):
+            if m.group(1) not in known:
+                continue
+            tag = TAG.match(m.group(0)).group(1)
+            url = (re.search(r"\(source: ([^)]*)\)", m.group(2)) or [None, ""])[1]
+            body = re.sub(r"\(source: [^)]*\)", "", m.group(2))
+            title = body.split(":", 1)[0].strip() if ":" in body[:150] else ""
+            used = _uses(body, earlier_sh, later_sh) or (len(title) > 12 and title.lower() in later_low)
+            if (tag, url) in seen:
+                continue
+            seen.add((tag, url))
+            rows.append({"source": tag, "title": title.split(" > ")[0][:100], "url": url, "used": used})
+    return rows
+
+
 def source_use(trace: list | None) -> tuple[list[str], list[str]]:
     """(sources shown, sources used) in one item's trace. Shown: the source's text was in a tool result. Used: the
     model's later reasoning or answer repeats two 4-word phrases from that text that it had not written before, or a
@@ -86,7 +113,7 @@ def kb_sections(trace: list | None, answer: str = "") -> list[dict]:
 
     rows, gt = [], _norm(answer)
     for i, s in enumerate(trace or []):
-        if s.get("role") != "tool" or "[local_kb]" not in str(s.get("result", "")):
+        if s.get("role") != "tool" or "[local_kb" not in str(s.get("result", "")):
             continue
         args = next((c.get("arguments") for c in reversed(trace[i - 1].get("tool_calls") or [])), {}) if i else {}
         crop = (args or {}).get("crop") or "" if isinstance(args, dict) else ""
@@ -307,7 +334,7 @@ def app() -> None:
                    "Appearance section: the heading is about symptoms, damage, identification or description. Correct "
                    "class: the candidate is the item's answer. Used: the model's later reasoning or answer repeats two "
                    "4-word phrases from the section that it had not written before the result.")
-        runs_kb = [r for r in harness if frame(r["dir"]).trace.map(lambda t: "[local_kb]" in json.dumps(t)).any()]
+        runs_kb = [r for r in harness if frame(r["dir"]).trace.map(lambda t: "[local_kb" in json.dumps(t)).any()]
         if not runs_kb:
             st.info("No run here showed knowledge-base text (run with --kb).")
             return
@@ -431,6 +458,12 @@ def app() -> None:
                         with st.expander("Prompt"):
                             st.text(it["prompt"][:3000])
                     st.markdown(f"**Answer:** {r['answer'] or '_(empty)_'}  \n**Ground truth:** {r['gt']}")
+                    if isinstance(r.get("trace"), list) and (srcs := source_list(r["trace"])):
+                        used = [x for x in srcs if x["used"]]
+                        st.markdown("**Sources used:** " + ("; ".join(f"[{x['source']}] [{x['title'] or x['url']}]({x['url']})"
+                                                                     for x in used) or "_none (text shown but not reused)_"))
+                        with st.expander(f"All sources shown ({len(srcs)})"):
+                            st.dataframe(pd.DataFrame(srcs), hide_index=True, width="stretch")
                     for n, br in base_recs.items():
                         if r["item_id"] in br.index:
                             x = br.loc[r["item_id"]]

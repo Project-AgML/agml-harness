@@ -61,13 +61,24 @@ SECTION_CHARS = 1500  # long sections are split at paragraph breaks into parts o
 MIN_SECTION_CHARS = 80
 
 
+def site_label(name: str) -> str:
+    """The site's display name (`label` in kb_sites.yaml), e.g. ucipm -> UC IPM."""
+    return sites().get(name, {}).get("label", name)
+
+
 def kb_dir(path: str | Path | None = None) -> Path:
     return Path(path or os.environ.get("AGML_KB") or "kb")
 
 
+_SITES = None
+
+
 def sites() -> dict[str, dict]:
-    cfg = yaml.safe_load(files("agml_agent").joinpath("config", "kb_sites.yaml").read_text())
-    return {s["name"]: s for s in cfg["sites"]}
+    global _SITES
+    if _SITES is None:
+        cfg = yaml.safe_load(files("agml_agent").joinpath("config", "kb_sites.yaml").read_text())
+        _SITES = {s["name"]: s for s in cfg["sites"]}
+    return _SITES
 
 
 # ---------------------------------------------------------------- crawl

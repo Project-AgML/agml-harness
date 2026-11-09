@@ -147,3 +147,23 @@ def test_pdf_markdown_finds_headings_and_drops_running_headers():
     finally:
         subprocess.run = real
     assert "# Symptoms" in md and "small brown spots that enlarge and merge." in md and "EPPO Bulletin" not in md
+
+
+def test_kb_text_names_its_site_and_viewer_lists_sources(tiny_kb, monkeypatch):
+    kb.build(tiny_kb)
+    monkeypatch.setattr(kb, "_SITES", None)
+    monkeypatch.setattr(kb, "sites", lambda: {"ucipm": {"label": "UC IPM"}})
+    monkeypatch.setattr(bench, "KB_INDEX", kb.KB(tiny_kb))
+    monkeypatch.setattr(bench, "KB_ONLY", True)
+    monkeypatch.setattr(bench, "NAMES", None)
+    monkeypatch.setattr(bench, "CLEAN_TEXT", 2)
+    out = bench.run_retrieve("orange powder", [{"name": "coffee leaf rust"}], "coffee", "disease")
+    assert "[local_kb: UC IPM] Coffee Leaf Rust" in out
+    from agml_agent import bench_view
+    trace = [{"role": "assistant", "reasoning": "", "text": "", "tool_calls": [{"name": "retrieve", "arguments": {}}]},
+             {"role": "tool", "result": out},
+             {"role": "assistant", "reasoning": "small pale yellow spots on the upper leaf surface grow into orange", "text": "rust"}]
+    rows = bench_view.source_list(trace)
+    assert rows and rows[0]["source"] == "local_kb: UC IPM" and rows[0]["url"] == "https://ipm.example/coffee-rust"
+    assert any(r["used"] for r in rows)
+    assert bench_view.source_use(trace)[0] == ["local_kb"]

@@ -22,6 +22,7 @@
 #                  names_gbif / names_plants / names_eppo (rows of the names table, not text sections)
 sites:
   - name: ucipm
+    label: UC IPM
     robots: https://ipm.ucanr.edu/robots.txt
     start: [https://ipm.ucanr.edu/agriculture/, https://ipm.ucanr.edu/home-and-landscape/]
     allow: '^https://ipm\.ucanr\.edu/(agriculture|home-and-landscape|PMG)/'
@@ -29,6 +30,7 @@ sites:
     max_pages: 30000   # 6,000 was reached on the first crawl (2026-11-03)
 
   - name: ncsu_extension
+    label: NC State Extension
     robots: https://content.ces.ncsu.edu/robots.txt
     sitemaps: [https://content.ces.ncsu.edu/sitemap.xml]
     allow: '^https://content\.ces\.ncsu\.edu/[a-z0-9-]+/?$'
@@ -37,6 +39,7 @@ sites:
     max_pages: 9000
 
   - name: texas_pdh
+    label: Texas Plant Disease Handbook
     robots: https://plantdiseasehandbook.tamu.edu/robots.txt
     sitemaps: [https://plantdiseasehandbook.tamu.edu/wp-sitemap-posts-post-1.xml,
                https://plantdiseasehandbook.tamu.edu/wp-sitemap-posts-page-1.xml]
@@ -46,6 +49,7 @@ sites:
     max_pages: 1500
 
   - name: feedipedia
+    label: Feedipedia
     robots: https://www.feedipedia.org/robots.txt
     start: ['https://www.feedipedia.org/content/feeds?category=All']
     allow: '^https://www\.feedipedia\.org/(node/\d+$|content/feeds\?category=All(&page=\d+)?$)'
@@ -55,6 +59,7 @@ sites:
     max_pages: 3000
 
   - name: tnau
+    label: TNAU Agritech
     robots: https://agritech.tnau.ac.in/robots.txt
     start: [https://agritech.tnau.ac.in/index.html]
     allow: '^https?://agritech\.tnau\.ac\.in/'
@@ -67,6 +72,7 @@ sites:
   # EPPO Global Database, public pages only: datasheets (HTML and PDF) and EPPO standards, among them the PM 7
   # diagnostic protocols (symptoms, identification)
   - name: eppo_docs
+    label: EPPO Global Database
     robots: https://gd.eppo.int/robots.txt
     start: [https://gd.eppo.int/datasheets/, https://gd.eppo.int/standards/PM1/, https://gd.eppo.int/standards/PM3/,
             https://gd.eppo.int/standards/PM4/, https://gd.eppo.int/standards/PM5/, https://gd.eppo.int/standards/PM6/,
@@ -80,6 +86,7 @@ sites:
 
   # EPPO taxon pages: preferred name, other scientific names, common names in many languages, taxonomy -> names table
   - name: eppo_taxa
+    label: EPPO Global Database
     robots: https://gd.eppo.int/robots.txt
     sitemaps: [https://gd.eppo.int/sitemaps/sitemap_taxon1.xml.gz, https://gd.eppo.int/sitemaps/sitemap_taxon2.xml.gz]
     allow: '^https://gd\.eppo\.int/taxon/[A-Z0-9]+$'
@@ -90,18 +97,21 @@ sites:
   # US grade standards (fresh and processed fruits and vegetables, grain): Title 7 of the Code of Federal Regulations,
   # GovInfo bulk data. Parts 51, 52 and 810 are indexed (one section per CFR section, titled by its subpart).
   - name: cfr_title7
+    label: US grade standards (7 CFR)
     robots: https://www.govinfo.gov/robots.txt
     files: [https://www.govinfo.gov/bulkdata/CFR/2025/title-7/CFR-2025-title-7.zip]
     parse: cfr
 
   # GBIF Backbone Taxonomy: all names (accepted, synonyms) and vernacular names -> names table
   - name: gbif_backbone
+    label: GBIF Backbone Taxonomy
     robots: https://hosted-datasets.gbif.org/robots.txt
     files: [https://hosted-datasets.gbif.org/datasets/backbone/current/backbone.zip]
     parse: names_gbif
 
   # USDA PLANTS complete checklist: symbols, accepted names and synonyms, common names, families -> names table
   - name: usda_plants
+    label: USDA PLANTS
     robots: https://plants.usda.gov/robots.txt
     files: [https://plants.usda.gov/DocumentLibrary/Txt/plantlst.txt]
     parse: names_plants
