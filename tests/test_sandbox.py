@@ -212,3 +212,12 @@ def test_shown_images_reach_a_run_folder_on_another_disk(tmp_path, monkeypatch):
     text, images = sandbox.run("show(img)", IMG, tmp_path / "run" / "tool_images")
     monkeypatch.setattr(Path, "replace", real)
     assert len(images) == 1 and Path(images[0]).exists() and "1 image(s) from show()" in text
+
+
+def test_saved_image_files_come_back_after_shown_ones(tmp_path):
+    code = "img.crop((0, 0, 10, 10)).save('crop1.png')\nimg.crop((0, 0, 20, 20)).save('crop2.jpg')\nshow(img)"
+    text, images = sandbox.run(code, IMG, tmp_path)
+    assert len(images) == 2 and "1 from show(), saved files crop1.png" in text
+    assert Image.open(images[0]).size == (64, 48) and Image.open(images[1]).size == (10, 10)
+    text, images = sandbox.run("img.save('whole.png')", IMG, tmp_path)
+    assert len(images) == 1 and "saved files whole.png" in text

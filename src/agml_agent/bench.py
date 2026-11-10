@@ -234,7 +234,7 @@ RUN_PYTHON_SCHEMA = {
                         "picture you were given (`W` x `H` pixels; `imgs` lists all images when there are several; the "
                         "files are input_file_0.png, input_file_1.png, ...), with `np` (numpy) and `Image` (PIL) ready; "
                         "numpy, PIL, cv2, skimage and scipy can be imported. Text you print() and images you pass to "
-                        "show(image) or img.show() (at most 2 per call) are returned to you. Coordinates in code are "
+                        "show(image) or img.show() or save as files (at most 2 per call) are returned to you. Coordinates in code are "
                         "pixels; give your answer in the scale the question asks for. Example: "
                         "show(img.crop((0, 0, W // 2, H // 2)).resize((W, H))) shows the top-left quarter enlarged. No "
                         "network, other files or other libraries."),

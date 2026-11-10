@@ -3,7 +3,7 @@
 What the code gets: `img`, a PIL image of the picture the model was shown (same size it saw; `imgs` lists all of
 them when an item has several; also saved as input_file_0.png, input_file_1.png, ... in the working folder), `W`, `H`
 (of `img`), `np`
-(numpy), `Image` (PIL), and `show(image)` (or PIL's `img.show()`) to send an image back (a PIL image or a numpy array; up to MAX_IMAGES per
+(numpy), `Image` (PIL), and `show(image)` (or PIL's `img.show()`, or saving an image file in its folder) to send an image back (a PIL image or a numpy array; up to MAX_IMAGES per
 call). `print()` output comes back as text (up to MAX_OUTPUT characters).
 
 What it cannot do (each call is a fresh `python -I` process in a temp folder holding only the image):
@@ -132,8 +132,19 @@ except BaseException as e:
     tb = [l for l in traceback.format_exception(type(e), e, e.__traceback__) if MODEL in l or not l.startswith("  File")]
     error = "".join(tb[-6:]).strip()
 sys.stdout = sys.__stdout__
+# image files the code saved are returned too, after show()'s (trial 3: the model often saved crops and never saw them)
+n_show, saved = len(shown), []
+for name in sorted(os.listdir(out_dir), key=lambda n: os.path.getmtime(os.path.join(out_dir, n))):
+    if (name.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"))
+            and not name.startswith(("input_file_", "show_")) and len(shown) < max_images):
+        try:
+            Image.open(os.path.join(out_dir, name)).convert("RGB").save(os.path.join(out_dir, f"show_{len(shown)}.png"))
+        except Exception:
+            continue
+        shown.append(os.path.join(out_dir, f"show_{len(shown)}.png"))
+        saved.append(name)
 with _open(os.path.join(out_dir, "result.json"), "w") as f:
-    json.dump({"output": buf.getvalue(), "error": error, "images": shown}, f)
+    json.dump({"output": buf.getvalue(), "error": error, "images": shown, "n_show": n_show, "saved": saved}, f)
 '''
 
 
@@ -173,7 +184,10 @@ def run(code: str, images, out_dir: Path | None = None, timeout: int = TIMEOUT) 
         if res["error"]:
             text = (text + "\n" if text else "") + "error: " + res["error"]
         if res["images"]:
-            text = (text + "\n" if text else "") + f"[{len(res['images'])} image(s) from show() follow]"
+            what = (f"{res.get('n_show', 0)} from show()" if res.get("n_show") else "") + (
+                (", " if res.get("n_show") else "") + "saved files " + ", ".join(res["saved"]) if res.get("saved") else "")
+            text = (text + "\n" if text else "") + (f"[{len(res['images'])} image(s) from show() follow]" if not res.get("saved")
+                                                     else f"[{len(res['images'])} image(s) follow: {what}]")
         return text or "(no output; use print() or show() to see results)", images
 
 
