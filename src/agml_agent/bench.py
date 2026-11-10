@@ -229,11 +229,15 @@ RUN_PYTHON_SCHEMA = {
     "type": "function",
     "function": {
         "name": "run_python",
-        "description": ("Run Python code on the image you were given. `img` is a PIL image of it (W x H pixels, the image "
-                        "you see; `imgs` lists all images when there are several), with `W`, `H`, `np` (numpy) and "
-                        "`Image` (PIL) ready; numpy, PIL, cv2, skimage and scipy can be imported. Text you print() and "
-                        "images you pass to show(image) (at most 2 per call) are returned to you. No files, network or "
-                        "other libraries."),
+        "description": ("Look at the image more closely with code: crop and enlarge a part of it, measure colours or "
+                        "sizes, or count regions, then see the result before you decide. `img` is a PIL image of the "
+                        "picture you were given (`W` x `H` pixels; `imgs` lists all images when there are several; the "
+                        "files are input_file_0.png, input_file_1.png, ...), with `np` (numpy) and `Image` (PIL) ready; "
+                        "numpy, PIL, cv2, skimage and scipy can be imported. Text you print() and images you pass to "
+                        "show(image) or img.show() (at most 2 per call) are returned to you. Coordinates in code are "
+                        "pixels; give your answer in the scale the question asks for. Example: "
+                        "show(img.crop((0, 0, W // 2, H // 2)).resize((W, H))) shows the top-left quarter enlarged. No "
+                        "network, other files or other libraries."),
         "parameters": {"type": "object", "properties": {"code": {"type": "string", "description": "Python code to run."}},
                        "required": ["code"]},
     },
@@ -376,6 +380,24 @@ def _label(src: str, ch: dict) -> str:
         site = (_loads(ch.get("raw_response") or "{}") or {}).get("site")
         return f"local_kb: {site_label(site)}" if site else src
     return src
+
+
+def _local_sources_text(kb_root: Path) -> str:
+    """The sources a --kb-only lookup searches, by display name, from the knowledge base's manifest."""
+    from agml_agent.kb import site_label
+
+    m = _loads((kb_root / "manifest.json").read_text()) if (kb_root / "manifest.json").exists() else {}
+    names = [n for n, c in (m.get("sites") or {}).items() if c.get("sections")] + list((m.get("names") or {}).get("rows") or {})
+    return ", ".join(dict.fromkeys(site_label(n) for n in names))
+
+
+def _describe_local_sources(kb_root: Path) -> None:
+    """--kb-only: retrieve's description names the databases actually searched (all on disk), not v1's live list."""
+    local = _local_sources_text(kb_root)
+    for schema in [RETRIEVE_SCHEMA, *RETRIEVE_MODES.values()]:
+        f = schema["function"]
+        f["description"] = f["description"].replace("external agricultural databases", "agricultural reference databases") \
+            .replace(f"({DATABASES})", f"({local}; all downloaded locally)")
 
 
 def _block_network() -> None:
@@ -840,6 +862,7 @@ def run(args: argparse.Namespace) -> Path:
         from agml_agent.kb import Names
         KB_ONLY = True
         NAMES = Names(args.kb) if (args.kb / "names.sqlite").exists() else None
+        _describe_local_sources(args.kb)
         _block_network()
     bench = Benchmark(args.data_dir, args.task or None, args.format or None, args.only, args.limit_per_dataset, args.seed)
     print(f"{len(bench.items)} items; {len(bench.skipped)} datasets skipped")

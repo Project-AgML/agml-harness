@@ -1,8 +1,9 @@
 """Sandbox for the `run_python` benchmark tool: the model's code runs on the item's image in a separate process.
 
 What the code gets: `img`, a PIL image of the picture the model was shown (same size it saw; `imgs` lists all of
-them when an item has several), `W`, `H` (of `img`), `np`
-(numpy), `Image` (PIL), and `show(image)` to send an image back (a PIL image or a numpy array; up to MAX_IMAGES per
+them when an item has several; also saved as input_file_0.png, input_file_1.png, ... in the working folder), `W`, `H`
+(of `img`), `np`
+(numpy), `Image` (PIL), and `show(image)` (or PIL's `img.show()`) to send an image back (a PIL image or a numpy array; up to MAX_IMAGES per
 call). `print()` output comes back as text (up to MAX_OUTPUT characters).
 
 What it cannot do (each call is a fresh `python -I` process in a temp folder holding only the image):
@@ -117,6 +118,7 @@ def show(image, *_):
     shown.append(path)
 imgs = [_pil_open(p).convert("RGB") for p in image_paths]
 img = imgs[0]
+Image.Image.show = lambda self, *a, **k: show(self)  # PIL's own show() also sends the image back
 W, H = img.size
 env = {"__name__": "__main__", "img": img, "imgs": imgs, "W": W, "H": H, "np": np, "Image": Image, "show": show}
 buf, error = io.StringIO(), None
@@ -145,7 +147,7 @@ def run(code: str, images, out_dir: Path | None = None, timeout: int = TIMEOUT) 
         work = Path(tmp)
         paths = []
         for i, im in enumerate(images if isinstance(images, (list, tuple)) else [images]):
-            paths.append(str(work / f"image_{i}.png"))
+            paths.append(str(work / f"input_file_{i}.png"))  # the names gemma expects (2026-11-09 trial: every call opened input_file_0.png)
             im.convert("RGB").save(paths[-1])
         (work / "code.py").write_text(code)
         env = {"PATH": os.environ.get("PATH", ""), "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",

@@ -179,3 +179,22 @@ def test_code_tool_is_offered_with_retrieve_on_classification_too(tmp_path, code
                     retrieve_mode="crosscheck-look-first"))
     offered = [r for r in FakeCodeVLLM.requests if r.get("tools")]
     assert offered and all({t["function"]["name"] for t in r["tools"]} == {"retrieve", "run_python"} for r in offered)
+
+
+def test_images_are_files_with_the_names_the_model_expects_and_pil_show_works(tmp_path):
+    text, images = sandbox.run("im = Image.open('input_file_0.png')\nprint(im.size)\nim.crop((0, 0, 8, 8)).show()", IMG, tmp_path)
+    assert "(64, 48)" in text and len(images) == 1 and Image.open(images[0]).size == (8, 8)
+
+
+def test_retrieve_description_names_the_local_sources_with_kb_only(tmp_path, monkeypatch):
+    import copy
+
+    from agml_agent import kb
+    (tmp_path / "manifest.json").write_text(json.dumps({"sites": {"ucipm": {"sections": 5}, "texas_pdh": {"sections": 0}},
+                                                        "names": {"rows": {"gbif_backbone": 9}}}))
+    monkeypatch.setattr(kb, "sites", lambda: {"ucipm": {"label": "UC IPM"}, "gbif_backbone": {"label": "GBIF Backbone Taxonomy"}})
+    monkeypatch.setattr(bench, "RETRIEVE_SCHEMA", copy.deepcopy(bench.RETRIEVE_SCHEMA))
+    monkeypatch.setattr(bench, "RETRIEVE_MODES", copy.deepcopy(bench.RETRIEVE_MODES))
+    bench._describe_local_sources(tmp_path)
+    d = bench.RETRIEVE_MODES["crosscheck-look-first"]["function"]["description"]
+    assert "(UC IPM, GBIF Backbone Taxonomy; all downloaded locally)" in d and "PlantVillage" not in d

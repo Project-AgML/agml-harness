@@ -24,6 +24,15 @@ ls -d ~/.local/share/uv/tools/vllm/lib/python3.12/site-packages/flashinfer_cubin
 nvidia-smi --query-gpu=name,memory.total --format=csv
 MODEL=$1; SEED=${2:-1}; REPEATS=${3:-3}; ARMS=${4:-"baseline look-first kb-keep-healthy"}; SUFFIX=${5:-}
 OUT=runs/confirm/seed$SEED
+# The knowledge base on the node's local disk: on the shared filesystem, lookups slowed from ~1 s to minutes once the
+# index grew to 2.5 GB with Wikipedia (2026-11-09: median 5 s, p90 132 s, max 25 min). Falls back to the shared copy.
+KB=kb
+LOCAL=${TMPDIR:-/tmp}/agml_kb_${SLURM_JOB_ID:-$$}
+if mkdir -p "$LOCAL" && cp kb/kb.sqlite kb/names.sqlite kb/manifest.json "$LOCAL"/ 2>/dev/null; then
+    KB=$LOCAL; trap 'rm -rf "$LOCAL"' EXIT; echo "knowledge base copied to $LOCAL"
+else
+    rm -rf "$LOCAL"; echo "knowledge base: using the shared copy (local copy failed)"
+fi
 COMMON=(--model "$MODEL" --data-dir $DATA --judge --limit-per-dataset "${LIMIT:-2}" --seed "$SEED")
 HARNESS=(--retrieve-mode crosscheck-look-first --no-live-search --retrieve-cache runs/pilot_api/retrieve_cache.jsonl)
 for i in $(seq "$REPEATS"); do
@@ -33,13 +42,13 @@ for i in $(seq "$REPEATS"); do
             baseline) uv run --extra bench agbench eval run "${COMMON[@]}" --out $OUT/baseline$SUFFIX ;;
             look-first) uv run --extra bench agml-agent-bench "${COMMON[@]}" "${HARNESS[@]}" --out $OUT/look-first$SUFFIX ;;
             kb-keep-healthy) uv run --extra bench agml-agent-bench "${COMMON[@]}" "${HARNESS[@]}" --clean-text 2 --check-options \
-                --kb kb --keep-healthy --out $OUT/kb-keep-healthy$SUFFIX ;;
+                --kb $KB --keep-healthy --out $OUT/kb-keep-healthy$SUFFIX ;;
             kb-tidy) uv run --extra bench agml-agent-bench "${COMMON[@]}" "${HARNESS[@]}" --clean-text 2 --check-options \
-                --kb kb --keep-healthy --tidy-names --crop-from-prompt --out $OUT/kb-tidy$SUFFIX ;;
+                --kb $KB --keep-healthy --tidy-names --crop-from-prompt --out $OUT/kb-tidy$SUFFIX ;;
             kb-only) uv run --extra bench agml-agent-bench "${COMMON[@]}" --retrieve-mode crosscheck-look-first --clean-text 2 \
-                --check-options --kb kb --keep-healthy --kb-only --out $OUT/kb-only$SUFFIX ;;  # local database only, no network
+                --check-options --kb $KB --keep-healthy --kb-only --out $OUT/kb-only$SUFFIX ;;  # local database only, no network
             code) uv run --extra bench agml-agent-bench "${COMMON[@]}" --retrieve-mode crosscheck-look-first --clean-text 2 \
-                --check-options --kb kb --keep-healthy --kb-only --code-tool --out $OUT/code$SUFFIX ;;  # both tools, no network
+                --check-options --kb $KB --keep-healthy --kb-only --code-tool --out $OUT/code$SUFFIX ;;  # both tools, no network
             *) echo "unknown arm $arm"; exit 1 ;;
         esac
     done
