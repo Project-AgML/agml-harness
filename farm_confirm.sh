@@ -13,6 +13,9 @@
 # keep-healthy, one after another on one GPU, so any drift hits all three.
 # usage: sbatch farm_confirm.sh <model> [seed, default 1] [repeats, default 3] [arms, default "baseline look-first kb-keep-healthy"] [out suffix]
 # e.g. a later version of one arm next to earlier runs: sbatch farm_confirm.sh google/gemma-4-12B-it 1 3 kb-keep-healthy -searchfix
+# Arm `code`: the kb-only arm plus run_python on every task; the model chooses retrieve, run_python, both or neither
+# (compare with kb-only on the same database, and with baseline). LIMIT (items per dataset, default 2) for a small
+# trial: LIMIT=1 sbatch farm_confirm.sh <model> 1 1 code -trial
 export DATA=/group/jmearlesgrp/data/AGgentic-benchmarks
 export PATH=$HOME/.local/bin:$HOME/.local/share/uv/tools/vllm/bin:$PATH
 module load cuda/13.3.0 && export CUDA_HOME=$(dirname $(dirname $(which nvcc)))
@@ -21,7 +24,7 @@ ls -d ~/.local/share/uv/tools/vllm/lib/python3.12/site-packages/flashinfer_cubin
 nvidia-smi --query-gpu=name,memory.total --format=csv
 MODEL=$1; SEED=${2:-1}; REPEATS=${3:-3}; ARMS=${4:-"baseline look-first kb-keep-healthy"}; SUFFIX=${5:-}
 OUT=runs/confirm/seed$SEED
-COMMON=(--model "$MODEL" --data-dir $DATA --judge --limit-per-dataset 2 --seed "$SEED")
+COMMON=(--model "$MODEL" --data-dir $DATA --judge --limit-per-dataset "${LIMIT:-2}" --seed "$SEED")
 HARNESS=(--retrieve-mode crosscheck-look-first --no-live-search --retrieve-cache runs/pilot_api/retrieve_cache.jsonl)
 for i in $(seq "$REPEATS"); do
     for arm in $ARMS; do
@@ -35,6 +38,8 @@ for i in $(seq "$REPEATS"); do
                 --kb kb --keep-healthy --tidy-names --crop-from-prompt --out $OUT/kb-tidy$SUFFIX ;;
             kb-only) uv run --extra bench agml-agent-bench "${COMMON[@]}" --retrieve-mode crosscheck-look-first --clean-text 2 \
                 --check-options --kb kb --keep-healthy --kb-only --out $OUT/kb-only$SUFFIX ;;  # local database only, no network
+            code) uv run --extra bench agml-agent-bench "${COMMON[@]}" --retrieve-mode crosscheck-look-first --clean-text 2 \
+                --check-options --kb kb --keep-healthy --kb-only --code-tool --out $OUT/code$SUFFIX ;;  # both tools, no network
             *) echo "unknown arm $arm"; exit 1 ;;
         esac
     done

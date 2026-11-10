@@ -150,6 +150,17 @@ uv run agml-agent-bench ... --run-dir runs/<run>                                
     "Fusarium wilt") are shown only if the text names the candidate: a name lookup can land on another host's
     disease.
   - `--kb DIR`: also search the local knowledge base (below); its sections come first.
+  - `--kb-only` (with `--kb`): the local knowledge base and its names table are the only sources; no API, web search
+    or cache, and connections off the machine raise.
+  - `--code-tool`: every task also gets `run_python(code)` next to `retrieve` after the first answer, and the model
+    chooses (neither, either, or both in any order, same call budget); detection and segmentation then get the check
+    step too (without it they stop at the first answer). `run_python` runs Python on the images the model saw (`img`,
+    `imgs`, `W`, `H`, `np`, `Image`, `show()`; numpy, PIL, cv2, skimage, scipy). `print()` output and up to 2 images per
+    call from `show()` come back (8 images per prompt in all). The tool description says what is available, not how to
+    use it. Sandbox (`sandbox.py`): a fresh `python -I` process per call in a temp folder holding only the item's
+    images, 60 s, 3 GB, no network, no other files, imports limited to those libraries (no pretrained models), code
+    reaching for `os`, `subprocess`, `__import__`, `eval` etc. refused. Shown
+    images are saved in `<run>/tool_images/`; the viewer's Traces page shows the code, output and images.
   - Pages from sites whose robots.txt blocks AI crawlers (PlantVillage, PNW Handbooks, APS, ProMusa) are never shown,
     even from the cache.
 - **Budget:** `max_tokens` (agbench's) caps completion tokens summed over all turns; tool results count only

@@ -25,6 +25,10 @@ dependencies = [
 # Benchmarking on AGgentic-benchmarks (private repo; needs GitHub SSH access): uv sync --extra bench
 bench = [
     "agbench",
+    # run_python (--code-tool): the only libraries the model's code may import besides numpy/PIL
+    "opencv-python-headless>=4.9",
+    "scikit-image>=0.22",
+    "scipy>=1.11",
 ]
 
 [project.scripts]

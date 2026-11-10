@@ -394,6 +394,11 @@ def app() -> None:
             if s.get("role") == "tool":
                 st.markdown(f"↳ **{s.get('name')}** result ({s.get('latency_s', 0):.1f}s)")
                 st.code(str(s.get("result", ""))[:4000], language=None, wrap_lines=True)
+                imgs = [p for p in s.get("images") or [] if Path(p).exists()]
+                if imgs:  # run_python: images the model's code passed to show()
+                    st.image(imgs, caption=[f"show() {i + 1}" for i in range(len(imgs))], width=320)
+                elif s.get("images"):
+                    st.caption(f"{len(s['images'])} image(s) from show(), not found on this machine")
                 continue
             step += 1
             st.markdown(f"**Model turn {step}**")
@@ -401,7 +406,12 @@ def app() -> None:
                 st.caption("Reasoning")
                 st.text(s["reasoning"][:4000])
             for c in s.get("tool_calls") or []:
-                st.code(f"{c.get('name')}({json.dumps(c.get('arguments'), ensure_ascii=False)})", language="python", wrap_lines=True)
+                a = c.get("arguments")
+                if c.get("name") == "run_python" and isinstance(a, dict) and isinstance(a.get("code"), str):
+                    st.markdown("`run_python` code:")
+                    st.code(a["code"], language="python", wrap_lines=True)
+                else:
+                    st.code(f"{c.get('name')}({json.dumps(a, ensure_ascii=False)})", language="python", wrap_lines=True)
             if s.get("text"):
                 st.caption("Text")
                 st.text(s["text"][:2000])

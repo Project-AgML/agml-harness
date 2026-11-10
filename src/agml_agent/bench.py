@@ -215,6 +215,29 @@ PLACEBO_MODES = {"crosscheck-placebo", "crosscheck-look-first-placebo"}
 # answer (token budget, server error), the first answer stands.
 LOOK_ONLY_TASKS = {"detection", "segmentation"}
 CHECK_PROMPT = "That is your first answer. You may cross-check it, then give your final answer in the format asked."
+# --code-tool: every task gets run_python next to retrieve, and the model chooses: no tool, either, or both in any
+# order, within the same call budget. Detection and segmentation then get the look-first check too (without the code
+# tool they still stop at the first answer). Detection baseline (fresh full baseline, 2026-11-09): the model misses
+# objects rather than drawing bad boxes (matched boxes overlap 0.76, but it answers [] on half the images that
+# contain objects and finds 1 in 20 objects). The tool descriptions say only what is available; how (or whether) to
+# use them is the model's choice. Runs in sandbox.py: no network, no files but the item's images, no libraries
+# beyond plain image processing (so no pretrained models).
+CODE_TOOL = False
+MAX_PROMPT_IMAGES = 8  # vLLM allows 8 images per prompt (agbench models.yaml max_images), the item's own included
+CODE_SLOTS = 8         # sandboxes running at once (the farm job has 8 CPUs)
+RUN_PYTHON_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "run_python",
+        "description": ("Run Python code on the image you were given. `img` is a PIL image of it (W x H pixels, the image "
+                        "you see; `imgs` lists all images when there are several), with `W`, `H`, `np` (numpy) and "
+                        "`Image` (PIL) ready; numpy, PIL, cv2, skimage and scipy can be imported. Text you print() and "
+                        "images you pass to show(image) (at most 2 per call) are returned to you. No files, network or "
+                        "other libraries."),
+        "parameters": {"type": "object", "properties": {"code": {"type": "string", "description": "Python code to run."}},
+                       "required": ["code"]},
+    },
+}
 # --keep-healthy: a first answer that finds no problem gets a second look without the tool. Knowledge-base runs
 # (2026-11-04): vivid symptom text turned 12 of 103 healthy first answers into a problem (4 with no cleanup, 8 with
 # --clean-text 1). The model can still change its answer when the image clearly shows a problem.
@@ -535,7 +558,8 @@ def run_retrieve(description: str = "", candidates: list | None = None, crop: st
                      for p in pages], RESULT_CHARS - len(NEXT_STEP)) + NEXT_STEP)
 
 
-# name -> (schema, function). Only external-database tools: see the leakage policy above.
+# name -> (schema, function). Only external-database tools: see the leakage policy above. (run_python, for detection and
+# segmentation with --code-tool, is not listed here: it reaches no data at all, only the item's own image, in sandbox.py.)
 BENCH_TOOLS = {"retrieve": (RETRIEVE_SCHEMA, run_retrieve)}
 
 
@@ -584,8 +608,10 @@ class HarnessMethod(VLMMethod):
         if retrieve_mode not in RETRIEVE_MODES:
             raise ValueError(f"retrieve_mode {retrieve_mode!r}; one of {sorted(RETRIEVE_MODES)}")
         self.retrieve_mode = retrieve_mode
-        self.name = f"{model_id} + tools" + ("" if retrieve_mode == "description+candidates" else f" ({retrieve_mode})")
+        self.name = f"{model_id} + tools" + ("" if retrieve_mode == "description+candidates" else f" ({retrieve_mode})") + (
+            " + code" if CODE_TOOL else "")
         self._lock = asyncio.Lock()
+        self._code_slots = asyncio.Semaphore(CODE_SLOTS)
 
     def config(self) -> dict:
         return {**super().config(), "name": self.name, "harness": "exploit", "tools": self.tools,
@@ -593,7 +619,7 @@ class HarnessMethod(VLMMethod):
                 "agml_agent_git": _git_sha(Path(__file__).parent), "agbench_commit": _agbench_commit(),
                 "retrieve_cache": str(cache.CACHE.path) if cache.CACHE else None, "live_search": scrape.LIVE_SEARCH,
                 "clean_text": CLEAN_TEXT, "check_options": CHECK_OPTIONS, "keep_healthy": KEEP_HEALTHY,
-                "tidy_names": TIDY_NAMES, "crop_from_prompt": CROP_FROM_PROMPT,
+                "tidy_names": TIDY_NAMES, "crop_from_prompt": CROP_FROM_PROMPT, "code_tool": CODE_TOOL,
                 "kb": str(KB_INDEX.path) if KB_INDEX is not None else None, "kb_only": KB_ONLY,
                 "kb_manifest": _loads((KB_INDEX.path.parent / "manifest.json").read_text())
                 if KB_INDEX is not None and (KB_INDEX.path.parent / "manifest.json").exists() else None}
@@ -640,6 +666,23 @@ class HarnessMethod(VLMMethod):
             result = f"error: {type(e).__name__}: {e}"
         return result, time.perf_counter() - t0
 
+    async def _run_code(self, raw_args: str, images: list) -> tuple[str, float, list[str]]:
+        """run_python: the model's code on the images it saw, in the sandbox (sandbox.py)."""
+        from agml_agent import sandbox
+
+        t0 = time.perf_counter()
+        try:
+            args = json.loads(raw_args or "{}")
+            code = args.get("code") if isinstance(args, dict) else None
+            if not code or not isinstance(code, str):
+                return "error: give the Python code to run as `code`.", time.perf_counter() - t0, []
+            out_dir = (self.trace_path.parent if self.trace_path else Path("runs")) / "tool_images"
+            async with self._code_slots:
+                text, images = await asyncio.to_thread(sandbox.run, code, images, out_dir)
+        except Exception as e:  # bad JSON, sandbox failure
+            text, images = f"error: {type(e).__name__}: {e}", []
+        return text, time.perf_counter() - t0, images
+
     async def predict(self, item: EvalItem) -> Prediction:
         model = await self.client.resolve_model()
         encoded = [encode_image(p, self.client.max_pixels) for p in item.images]
@@ -649,11 +692,20 @@ class HarnessMethod(VLMMethod):
         body = dict(self.body)
         temperature = body.pop("temperature", None)
         schemas = [RETRIEVE_MODES[self.retrieve_mode] if t == "retrieve" else BENCH_TOOLS[t][0] for t in self.tools]
+        seen_images, n_shown = [], 0
+        max_shown = max(0, MAX_PROMPT_IMAGES - len(item.images))
+        if CODE_TOOL:
+            from PIL import Image
+
+            schemas = schemas + [RUN_PYTHON_SCHEMA]
+            for p, (_, size) in zip(item.images, encoded):  # the code sees what the model saw, at the size it saw
+                im = Image.open(p).convert("RGB")
+                seen_images.append(im if list(im.size) == list(size) else im.resize(tuple(size), Image.BICUBIC))
 
         trace, n_calls, tool_s, used = [], 0, 0.0, []
         prompt_tokens = completion_tokens = 0
         text, finish, err, t0 = "", "stop", None, time.perf_counter()
-        look_first = self.retrieve_mode.startswith("crosscheck-look-first")
+        look_first = self.retrieve_mode.startswith("crosscheck-look-first") or CODE_TOOL
         looking, first_answer, tools_off = look_first, None, False
         for _ in range(self.max_tool_calls + 2 + look_first):
             remaining = self.max_tokens - completion_tokens
@@ -676,7 +728,7 @@ class HarnessMethod(VLMMethod):
                           "tool_calls": [{"name": c.function.name, "arguments": _loads(c.function.arguments)} for c in calls]})
             if looking:
                 looking = False
-                if finish != "stop" or not text or item.task in LOOK_ONLY_TASKS:
+                if finish != "stop" or not text or (item.task in LOOK_ONLY_TASKS and not CODE_TOOL):
                     break
                 first_answer = text
                 tools_off = KEEP_HEALTHY and bool(HEALTHY_ANSWER.search(text))  # a healthy first answer: second look, no tool
@@ -688,16 +740,31 @@ class HarnessMethod(VLMMethod):
             messages.append({"role": "assistant", "content": text,
                              "tool_calls": [{"id": c.id, "type": "function",
                                              "function": {"name": c.function.name, "arguments": c.function.arguments}} for c in calls]})
+            shown = []  # images from run_python this turn: sent after the tool results, as one user message
             for c in calls:
+                images = []
                 if n_calls < self.max_tool_calls:
                     n_calls += 1
-                    result, dt = await self._call_tool(c.function.name, c.function.arguments, item.choices or [], item)
+                    if CODE_TOOL and c.function.name == "run_python":
+                        result, dt, images = await self._run_code(c.function.arguments, seen_images)
+                        if n_shown + len(images) > max_shown:
+                            images = images[:max(0, max_shown - n_shown)]
+                            result += f"\n[only {max_shown} images per item can be returned; the rest were dropped]"
+                        n_shown += len(images)
+                    else:
+                        result, dt = await self._call_tool(c.function.name, c.function.arguments, item.choices or [], item)
                     used.append(c.function.name)
                 else:
                     result, dt = "error: tool-call budget used up; answer now", 0.0
                 tool_s += dt
-                trace.append({"role": "tool", "name": c.function.name, "result": result, "latency_s": round(dt, 3)})
+                trace.append({"role": "tool", "name": c.function.name, "result": result, "latency_s": round(dt, 3),
+                              **({"images": images} if images else {})})
                 messages.append({"role": "tool", "tool_call_id": c.id, "name": c.function.name, "content": result})
+                shown += images
+            if shown:
+                messages.append({"role": "user", "content": [
+                    *({"type": "image_url", "image_url": {"url": encode_image(p, self.client.max_pixels)[0]}} for p in shown),
+                    {"type": "text", "text": "Images from show(), in order."}]})
 
         latency = time.perf_counter() - t0
         checked_finish, kept_first = finish, first_answer is not None and (finish != "stop" or not text)
@@ -760,8 +827,9 @@ def run(args: argparse.Namespace) -> Path:
     cache.CACHE = None if args.no_retrieve_cache or args.kb_only else RetrievalCache(
         args.retrieve_cache or args.out / "retrieve_cache.jsonl")
     scrape.LIVE_SEARCH = not args.no_live_search
-    global CLEAN_TEXT, CHECK_OPTIONS, KB_INDEX, KEEP_HEALTHY, TIDY_NAMES, CROP_FROM_PROMPT, KB_ONLY, NAMES
+    global CLEAN_TEXT, CHECK_OPTIONS, KB_INDEX, KEEP_HEALTHY, TIDY_NAMES, CROP_FROM_PROMPT, KB_ONLY, NAMES, CODE_TOOL
     CLEAN_TEXT, CHECK_OPTIONS, KEEP_HEALTHY = args.clean_text, args.check_options, args.keep_healthy
+    CODE_TOOL = args.code_tool
     TIDY_NAMES, CROP_FROM_PROMPT = args.tidy_names, args.crop_from_prompt
     if args.kb:
         from agml_agent.kb import KB
@@ -780,7 +848,7 @@ def run(args: argparse.Namespace) -> Path:
     tag = ("tools" if args.retrieve_mode == "description+candidates" else f"tools-{args.retrieve_mode}") + (
         {0: "", 1: "-clean", 2: "-clean2"}[args.clean_text] + ("-options" if args.check_options else "") + ("-kb" if args.kb else "") + (
         "-keephealthy" if args.keep_healthy else "") + ("-tidy" if args.tidy_names else "") + (
-        "-crop" if args.crop_from_prompt else "") + ("-kbonly" if args.kb_only else ""))
+        "-crop" if args.crop_from_prompt else "") + ("-kbonly" if args.kb_only else "") + ("-code" if args.code_tool else ""))
     rd = args.run_dir or args.out / f"{args.model.replace('/', '__')}__{tag}_{datetime.now():%Y%m%d-%H%M%S}"
     rd.mkdir(parents=True, exist_ok=True)
 
@@ -843,6 +911,10 @@ def main() -> None:
                    help="crosscheck-look-first: a first answer that finds no problem gets a second look without the tool, "
                         "kept unless the image clearly shows a problem.")
     p.add_argument("--kb", type=Path, help="Local knowledge base folder (agml-agent-kb), searched next to the API sources.")
+    p.add_argument("--code-tool", action="store_true",
+                   help="Offer run_python (sandboxed Python on the item's images: numpy, PIL, cv2, skimage, scipy; print() "
+                        "and show() come back) next to retrieve on every task, after the first answer; the model "
+                        "chooses which to use. Detection and segmentation then get the check step too.")
     p.add_argument("--kb-only", action="store_true",
                    help="Only the local knowledge base (--kb) and its names table: no API sources, web search, Wikipedia "
                         "or lookup cache, and connections off this machine raise.")
