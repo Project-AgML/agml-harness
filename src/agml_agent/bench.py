@@ -324,6 +324,8 @@ def _local_lookup(name: str, sci: str | None, aliases: list, crop: str) -> dict:
     terms = [name, sci, *aliases]
     if info:
         terms += [info["scientific_name"], *info["synonyms"], *info["common_names"]]
+    if info and info["source"] == "wikipedia":
+        info = None  # a Wikipedia redirect gives the article to search, not a scientific name for the names line
     found = {}
     hits = KB_INDEX.search(list(dict.fromkeys(t for t in terms if t)), crop) if KB_INDEX is not None else []
     if hits:

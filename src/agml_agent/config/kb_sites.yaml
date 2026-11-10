@@ -65,7 +65,9 @@ sites:
     allow: '^https?://agritech\.tnau\.ac\.in/'
     https: true
     https: true
-    deny: '\?|/(tamil|ta|ta_)/|/(images|img|photos?)/'
+    # also the Tamil farm magazine (Uzhavarin Valarum Velanmai), 100-200 MB monthly issues: Tamil text or scans without
+    # a text layer (checked 2026-11-09: of 147 PDFs over 20 MB, 5 English, 41 Tamil, 101 scanned, mostly this magazine)
+    deny: '\?|/(tamil|ta|ta_)/|/(images|img|photos?)/|valarum(%20| )velanmai|/pdf/\d{4}vv/|/pdf/\d{4}/[^/]*(UVV|uvv|(?i:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)[^/]*(19|20)\d\d)[^/]*\.pdf$'
     documents: true
     max_pages: 40000
 
@@ -115,3 +117,14 @@ sites:
     robots: https://plants.usda.gov/robots.txt
     files: [https://plants.usda.gov/DocumentLibrary/Txt/plantlst.txt]
     parse: names_plants
+
+  # English Wikipedia, official dump (dumps.wikimedia.org; no robots.txt rules; one connection). Only a subset is
+  # indexed, chosen by a rule that does not use benchmark class names: articles with a taxonomy infobox (every
+  # organism article) and articles in plant-disease, pest, crop and agriculture categories; redirects to those
+  # articles go into the names table. Text CC BY-SA 4.0.
+  - name: wikipedia
+    label: Wikipedia
+    robots: https://dumps.wikimedia.org/robots.txt
+    files: [https://dumps.wikimedia.org/enwiki/20261101/enwiki-20261101-pages-articles-multistream.xml.bz2,
+            https://dumps.wikimedia.org/enwiki/20261101/enwiki-20261101-pages-articles-multistream-index.txt.bz2]
+    parse: wikipedia

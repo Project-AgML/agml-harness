@@ -107,7 +107,7 @@ class Crawler:
                 self.done[r["url"]] = r
         self._last = 0.0
         # links found but not fetched, by reason: reported in crawl.json so nothing is lost silently
-        self.skipped = {"robots": set(), "documents": set()}
+        self.skipped = {"robots": set(), "documents": set(), "denied_documents": set()}
 
     def ok(self, url: str) -> bool:
         if not self.allow.search(url) or (self.deny and self.deny.search(url)):
@@ -209,10 +209,12 @@ class Crawler:
                   "cap_reached": bool(queue), "not_fetched_queue": len(queue),
                   "errors": sum(r["status"] != 200 for r in self.done.values()),
                   "skipped_robots": len(self.skipped["robots"]), "skipped_documents": len(self.skipped["documents"]),
-                  "finished": str(date.today())}
+                  "skipped_denied_documents": len(self.skipped["denied_documents"]),
+                  "removed": sum(bool(r.get("removed")) for r in self.done.values()), "finished": str(date.today())}
         (self.dir / "crawl.json").write_text(json.dumps(
             {**report, "skipped_documents_urls": sorted(self.skipped["documents"]),
-             "skipped_robots_urls": sorted(self.skipped["robots"]), "queue": queue}, indent=1))
+             "skipped_robots_urls": sorted(self.skipped["robots"]),
+             "skipped_denied_documents_urls": sorted(self.skipped["denied_documents"]), "queue": queue}, indent=1))
         return report
 
     def _follows(self, url: str) -> bool:
@@ -229,6 +231,8 @@ class Crawler:
             if re.search(r"\.(pdf|docx?|xlsx?|pptx?)$", u, re.I):  # documents: PDFs where the site config says
                 if self.cfg.get("documents") and re.search(r"\.pdf$", u, re.I) and self.ok(u):  # so, else listed
                     out.append(u)
+                elif self.deny and self.deny.search(u) and self.allow.search(u):
+                    self.skipped["denied_documents"].add(u)
                 elif self.allow.search(u):
                     self.skipped["documents"].add(u)
             elif not re.search(r"\.(jpe?g|png|gif|svg|webp|ico|css|js|zip|mp4|mp3)$", u, re.I) and self.ok(u):
@@ -424,82 +428,129 @@ def gbif_descriptions(zip_path: Path, names_db: Path, site: str) -> list[dict]:
     return out
 
 
+class _Sink:
+    """Sections written as they are made (docs.jsonl.gz and the FTS index), so millions of Wikipedia sections never
+    sit in memory; counts kept per site and kind."""
+
+    def __init__(self, root: Path):
+        self.f = gzip.open(root / "docs.jsonl.gz.part", "wt")
+        self.db = root / "kb.sqlite.part"
+        self.db.unlink(missing_ok=True)
+        self.con = sqlite3.connect(self.db)
+        self.con.execute("PRAGMA journal_mode=OFF")
+        self.con.execute("PRAGMA synchronous=OFF")
+        self.con.execute("CREATE VIRTUAL TABLE docs USING fts5(title, heading, text, site UNINDEXED, url UNINDEXED, "
+                         "kind UNINDEXED, tokenize='porter unicode61')")
+        self.batch, self.n, self.sites, self.kinds, self.urls = [], 0, {}, {}, {}
+
+    def add(self, x: dict) -> None:
+        self.f.write(json.dumps(x, ensure_ascii=False) + "\n")
+        self.batch.append((x["title"], x["heading"], x["text"], x["site"], x["url"], x["kind"]))
+        self.n += 1
+        self.sites[x["site"]] = self.sites.get(x["site"], 0) + 1
+        self.kinds[x["kind"]] = self.kinds.get(x["kind"], 0) + 1
+        self.urls.setdefault(x["site"], set()).add(x["url"])
+        if len(self.batch) >= 50000:
+            self.flush()
+
+    def flush(self) -> None:
+        self.con.executemany("INSERT INTO docs VALUES (?,?,?,?,?,?)", self.batch)
+        self.con.commit()
+        self.batch = []
+
+    def close(self, root: Path) -> None:
+        self.flush()
+        self.con.close()
+        self.f.close()
+        (root / "docs.jsonl.gz.part").replace(root / "docs.jsonl.gz")
+        self.db.replace(root / "kb.sqlite")
+
+
 def build(root: Path) -> dict:
     import trafilatura
 
-    rows, counts = [], {}
+    out, counts = _Sink(root), {}
     for name, cfg in sites().items():
         d = root / "raw" / name
         if not (d / "pages.jsonl").exists() or cfg.get("parse", "html") in ("names_plants", "names_eppo"):
             continue
         if cfg.get("parse") == "names_gbif":  # names go to names.sqlite; the backbone's descriptions are text
-            n0 = len(rows)
             for f in sorted((d / "files").glob("*.zip")):
-                rows += gbif_descriptions(f, root / "names.sqlite", name)
-            counts[name] = {"pages": len({r["url"] for r in rows[n0:]}), "sections": len(rows) - n0}
-            continue
-        if cfg.get("parse") == "cfr":
-            n0 = len(rows)
+                for x in gbif_descriptions(f, root / "names.sqlite", name):
+                    out.add(x)
+        elif cfg.get("parse") == "cfr":
             for f in sorted((d / "files").glob("*.zip")):
                 for x in cfr_sections(f):
-                    for i, (head, text) in enumerate(sections(x["text"], x["heading"])):
-                        rows.append({"site": name, "url": x["url"], "title": x["title"], "heading": head,
-                                     "kind": kind_of(head), "text": text})
-            counts[name] = {"pages": len({r["url"] for r in rows[n0:]}), "sections": len(rows) - n0}
-            continue
-        seen_text = set()
-        n_pages = 0
-        for line in (d / "pages.jsonl").read_text().splitlines():
-            try:
-                r = json.loads(line)
-            except json.JSONDecodeError:  # a line still being written by a running crawl
-                continue
-            if not r.get("sha1"):
-                continue
-            if r.get("type") == "application/pdf":
+                    for head, text in sections(x["text"], x["heading"]):
+                        out.add({"site": name, "url": x["url"], "title": x["title"], "heading": head,
+                                 "kind": kind_of(head), "text": text})
+        elif cfg.get("parse") == "wikipedia":
+            from agml_agent import kb_wikipedia
+
+            ex = d / "extract" / "articles.jsonl.gz"
+            if not ex.exists():
+                if not any((d / "files").glob("*-index.txt.bz2")):
+                    continue  # dump still downloading
+                kb_wikipedia.extract(root)
+            for a in kb_wikipedia.articles(root):
+                if LEAK.search(a["title"]):
+                    continue
+                u = kb_wikipedia.url(a["title"])
+                for head0, text0 in a["sections"]:
+                    if LEAK.search(text0):
+                        continue
+                    for head, text in sections(text0, head0):
+                        out.add({"site": name, "url": u, "title": a["title"], "heading": head, "kind": kind_of(head),
+                                 "text": text})
+            counts[name] = {"extract": json.loads((d / "extract" / "extract.json").read_text())}
+        else:
+            seen_text = set()
+            n_pages = 0
+            for line in (d / "pages.jsonl").read_text().splitlines():
                 try:
-                    title, md = pdf_markdown(gzip.decompress((d / "html" / f"{r['sha1']}.pdf.gz").read_bytes()))
-                except Exception:  # damaged or scanned PDF
+                    r = json.loads(line)
+                except json.JSONDecodeError:  # a line still being written by a running crawl
                     continue
-            else:
-                html = gzip.decompress((d / "html" / f"{r['sha1']}.html.gz").read_bytes()).decode("utf-8", "ignore")
-                meta = trafilatura.extract_metadata(html)
-                title = (meta.title if meta and meta.title else "").strip()
-                md = trafilatura.extract(html, output_format="markdown", include_formatting=True, include_tables=True,
-                                         include_links=False, include_images=False, url=r["final_url"]) or ""
-            if not md or LEAK.search(title) or LEAK.search(md):  # leakage: no pages about datasets or ML
-                continue
-            if not english(md):  # Tamil and other non-English pages
-                continue
-            n_pages += 1
-            for head, text in sections(md, title):
-                if NAVIGATION.search(text[:300]):
+                if not r.get("sha1"):
                     continue
-                key = hashlib.sha1(text.encode()).hexdigest()
-                if key in seen_text:  # navigation blocks and boilerplate repeated across pages
+                if r.get("type") == "application/pdf":
+                    try:
+                        title, md = pdf_markdown(gzip.decompress((d / "html" / f"{r['sha1']}.pdf.gz").read_bytes()))
+                    except Exception:  # damaged or scanned PDF
+                        continue
+                else:
+                    html = gzip.decompress((d / "html" / f"{r['sha1']}.html.gz").read_bytes()).decode("utf-8", "ignore")
+                    meta = trafilatura.extract_metadata(html)
+                    title = (meta.title if meta and meta.title else "").strip()
+                    md = trafilatura.extract(html, output_format="markdown", include_formatting=True,
+                                             include_tables=True, include_links=False, include_images=False,
+                                             url=r["final_url"]) or ""
+                if not md or LEAK.search(title) or LEAK.search(md):  # leakage: no pages about datasets or ML
                     continue
-                seen_text.add(key)
-                rows.append({"site": name, "url": r["final_url"], "title": title, "heading": head,
+                if not english(md):  # Tamil and other non-English pages
+                    continue
+                n_pages += 1
+                for head, text in sections(md, title):
+                    if NAVIGATION.search(text[:300]):
+                        continue
+                    key = hashlib.sha1(text.encode()).hexdigest()
+                    if key in seen_text:  # navigation blocks and boilerplate repeated across pages
+                        continue
+                    seen_text.add(key)
+                    out.add({"site": name, "url": r["final_url"], "title": title, "heading": head,
                              "kind": kind_of(head), "text": text})
-        counts[name] = {"pages": n_pages, "sections": sum(x["site"] == name for x in rows)}
+            counts[name] = {"pages": n_pages}
+        counts.setdefault(name, {}).update({"pages": len(out.urls.get(name, ())), "sections": out.sites.get(name, 0)})
         if (d / "crawl.json").exists():  # what the crawl did not fetch, and whether it stopped at its page cap
             c = json.loads((d / "crawl.json").read_text())
-            counts[name]["crawl"] = {k: c[k] for k in ("pages", "cap_reached", "not_fetched_queue", "errors",
-                                                       "skipped_robots", "skipped_documents", "finished") if k in c}
-    with gzip.open(root / "docs.jsonl.gz", "wt") as f:
-        for x in rows:
-            f.write(json.dumps(x, ensure_ascii=False) + "\n")
-    db = root / "kb.sqlite"
-    db.unlink(missing_ok=True)
-    con = sqlite3.connect(db)
-    con.execute("CREATE VIRTUAL TABLE docs USING fts5(title, heading, text, site UNINDEXED, url UNINDEXED, "
-                "kind UNINDEXED, tokenize='porter unicode61')")
-    con.executemany("INSERT INTO docs VALUES (?,?,?,?,?,?)",
-                    [(x["title"], x["heading"], x["text"], x["site"], x["url"], x["kind"]) for x in rows])
-    con.commit()
-    con.close()
-    manifest = {"built": str(date.today()), "sites": counts, "sections": len(rows),
-                "kinds": {k: sum(x["kind"] == k for x in rows) for k in ["symptom", "life_cycle", "management", "other"]}}
+            counts[name]["crawl"] = {k: c[k] for k in ("pages", "files", "bytes", "cap_reached", "not_fetched_queue",
+                                                       "errors", "skipped_robots", "skipped_documents",
+                                                       "skipped_denied_documents", "removed", "finished") if k in c}
+    out.close(root)
+    old = json.loads((root / "manifest.json").read_text()) if (root / "manifest.json").exists() else {}
+    manifest = {"built": str(date.today()), "sites": counts, "sections": out.n,
+                "kinds": {k: out.kinds.get(k, 0) for k in ["symptom", "life_cycle", "management", "other"]},
+                **({"names": old["names"]} if "names" in old else {})}
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return manifest
 
@@ -622,6 +673,22 @@ def _eppo_rows(d: Path):
                    "", kingdom, family)
 
 
+def _wikipedia_rows(root: Path):
+    """Kept Wikipedia articles (title) and the redirects that point to them ("Late blight" -> the article)."""
+    from agml_agent import kb_wikipedia
+
+    titles = set()
+    for a in kb_wikipedia.articles(root):
+        titles.add(a["title"])
+        yield ("wikipedia", a["title"], a["title"], a["title"], norm_name(a["title"]), "scientific", "en", "", "", "")
+    with gzip.open(root / "raw" / "wikipedia" / "extract" / "redirects.tsv.gz", "rt") as f:
+        for line in f:
+            src, _, target = line.rstrip("\n").partition("\t")
+            target = target.split("#", 1)[0]
+            if target in titles:
+                yield ("wikipedia", target, target, src, norm_name(src), "common", "en", "", "", "")
+
+
 def build_names(root: Path) -> dict:
     """names.sqlite: one table of names from the GBIF Backbone, USDA PLANTS and EPPO taxon pages, indexed by
     normalised name, so a class name can be resolved to its accepted scientific name, synonyms and common names."""
@@ -636,9 +703,13 @@ def build_names(root: Path) -> dict:
     for name, cfg in sites().items():
         d = root / "raw" / name
         kind = cfg.get("parse", "")
-        if not kind.startswith("names") or not (d / "pages.jsonl").exists():
+        if not (kind.startswith("names") or kind == "wikipedia") or not (d / "pages.jsonl").exists():
             continue
-        if kind == "names_gbif":
+        if kind == "wikipedia":
+            if not (d / "extract" / "redirects.tsv.gz").exists():
+                continue
+            rows = _wikipedia_rows(root)
+        elif kind == "names_gbif":
             rows = (x for f in sorted((d / "files").glob("*.zip")) for x in _gbif_rows(f))
         elif kind == "names_plants":
             rows = (x for f in sorted((d / "files").glob("*.txt")) for x in _plants_rows(f))
@@ -670,7 +741,7 @@ class Names:
     """Resolve a class name to its taxon: accepted scientific name, synonyms, English common names, kingdom and
     family. EPPO first (pests and diseases, disease common names), then USDA PLANTS, then GBIF."""
 
-    ORDER = ("eppo", "usda_plants", "gbif")
+    ORDER = ("eppo", "usda_plants", "gbif", "wikipedia")
 
     def __init__(self, root: str | Path | None = None):
         self.path = kb_dir(root) / "names.sqlite"
