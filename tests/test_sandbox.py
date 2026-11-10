@@ -198,3 +198,17 @@ def test_retrieve_description_names_the_local_sources_with_kb_only(tmp_path, mon
     bench._describe_local_sources(tmp_path)
     d = bench.RETRIEVE_MODES["crosscheck-look-first"]["function"]["description"]
     assert "(UC IPM, GBIF Backbone Taxonomy; all downloaded locally)" in d and "PlantVillage" not in d
+
+
+def test_shown_images_reach_a_run_folder_on_another_disk(tmp_path, monkeypatch):
+    """Farm: the sandbox's temp folder is on the node's disk, the run folder on the shared filesystem (2026-11-10:
+    renaming across them failed, so no image came back)."""
+    real = Path.replace
+
+    def cross_device(self, target):
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr(Path, "replace", cross_device)
+    text, images = sandbox.run("show(img)", IMG, tmp_path / "run" / "tool_images")
+    monkeypatch.setattr(Path, "replace", real)
+    assert len(images) == 1 and Path(images[0]).exists() and "1 image(s) from show()" in text

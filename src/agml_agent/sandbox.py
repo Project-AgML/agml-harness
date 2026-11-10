@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -166,7 +167,7 @@ def run(code: str, images, out_dir: Path | None = None, timeout: int = TIMEOUT) 
         out_dir.mkdir(parents=True, exist_ok=True)
         for i, p in enumerate(res["images"]):
             dest = out_dir / f"{next(_counter)}_{i}.png"
-            Path(p).replace(dest)
+            shutil.copyfile(p, dest)  # not a rename: the temp folder and the run folder can be on different disks
             images.append(str(dest))
         text = res["output"][:MAX_OUTPUT] + ("\n[output cut]" if len(res["output"]) > MAX_OUTPUT else "")
         if res["error"]:
