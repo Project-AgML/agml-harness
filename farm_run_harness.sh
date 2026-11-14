@@ -2,7 +2,7 @@
 #SBATCH --job-name=agml-harness
 #SBATCH --output=farm_outputs/%A.out
 #SBATCH --error=farm_outputs/%A.err
-#SBATCH --account=jmearlesgrp
+#SBATCH --account=geminigrp
 #SBATCH --partition=gpu-6000_ada-h
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
@@ -20,4 +20,20 @@ export LLAMA_SERVER_BIN=/group/jmearlesgrp/scratch/eranario/llama.cpp/build/bin/
 ls -d ~/.local/share/uv/tools/vllm/lib/python3.12/site-packages/flashinfer_cubin* >/dev/null 2>&1 || vllm download-kernels
 nvidia-smi --query-gpu=name,memory.total --format=csv
 MODEL=$1; shift
-uv run --extra bench agml-agent-bench --model "$MODEL" --data-dir $DATA --judge --out runs/harness "$@"
+# `--kb DIR`: read the knowledge base from a copy on the node's local disk (on the shared filesystem, lookups slowed
+# from ~1 s to minutes once the index grew to 2.5 GB, 2026-11-09); falls back to DIR if the copy fails.
+ARGS=()
+while [ $# -gt 0 ]; do
+    if [ "$1" = "--kb" ] && [ -n "$2" ]; then
+        LOCAL=${TMPDIR:-/tmp}/agml_kb_${SLURM_JOB_ID:-$$}
+        if mkdir -p "$LOCAL" && cp "$2"/kb.sqlite "$2"/names.sqlite "$2"/manifest.json "$LOCAL"/ 2>/dev/null; then
+            trap 'rm -rf "$LOCAL"' EXIT; echo "knowledge base copied to $LOCAL"; ARGS+=(--kb "$LOCAL")
+        else
+            rm -rf "$LOCAL"; echo "knowledge base: using $2 (local copy failed)"; ARGS+=(--kb "$2")
+        fi
+        shift 2
+    else
+        ARGS+=("$1"); shift
+    fi
+done
+uv run --extra bench agml-agent-bench --model "$MODEL" --data-dir $DATA --judge --out runs/harness "${ARGS[@]}"
