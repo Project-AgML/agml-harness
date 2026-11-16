@@ -14,7 +14,10 @@ answers are shown next to each trace for the same item.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import pickle
 import re
 import subprocess
 import sys
@@ -141,15 +144,86 @@ def kb_sections(trace: list | None, answer: str = "") -> list[dict]:
     return rows
 
 
-def kb_summary(p) -> dict:
-    """Knowledge-base relevance and use over one run's frame (rows of predictions with `trace` and `gt`)."""
-    import pandas as pd
+# Loading a full run's traces (32k items, ~320 MB) and checking source use on all of them took minutes at every start.
+# Instead: a small index per traces.jsonl (each item's summary and where its last trace sits in the file), saved to
+# disk; traces are read by offset only for the items on screen; source use and knowledge-base rows are computed for a
+# whole run only when a page needs them, and also saved. Cache files are keyed by the file's path, size and mtime, so
+# a changed or resumed run is re-indexed. The run folders are never written to.
+CACHE_DIR = Path(os.environ.get("AGML_VIEW_CACHE", Path.home() / ".cache" / "agml-agent-view"))
+CACHE_VERSION = 1
+PAGE = 10  # Traces page: items shown at first and per "Load more"
 
-    ag = p["ag_task"] if "ag_task" in p else [""] * len(p)
-    rows = [dict(r, item_id=i, score=sc, ag_task=a) for i, t, gt, sc, a in zip(p["item_id"], p["trace"], p["gt"], p["score"], ag)
-            for r in kb_sections(t, str(gt))]
-    calls = sum(1 for t in p.trace for s in (t or []) if s.get("role") == "tool")
-    k = pd.DataFrame(rows)
+
+def _cached(path: Path, kind: str, build):
+    s = path.stat()
+    key = hashlib.sha1(f"{path.resolve()}|{s.st_size}|{s.st_mtime_ns}|{kind}|{CACHE_VERSION}".encode()).hexdigest()[:20]
+    f = CACHE_DIR / f"{kind}-{key}.pkl"
+    if f.exists():
+        try:
+            with open(f, "rb") as fh:
+                return pickle.load(fh)
+        except Exception:
+            pass
+    out = build()
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(f".{os.getpid()}.tmp")
+        with open(tmp, "wb") as fh:
+            pickle.dump(out, fh)
+        os.replace(tmp, f)
+    except OSError:
+        pass  # no cache: still works, just slower next time
+    return out
+
+
+def trace_index(path: Path) -> dict[str, dict]:
+    """item_id -> {n_tool_calls, tools_used, tool_s, n_tool_results, offset, length} for the item's last trace in
+    traces.jsonl (a resumed run may have retried an item)."""
+    def build():
+        idx, off = {}, 0
+        with open(path, "rb") as f:
+            for line in f:
+                if line.strip():
+                    t = json.loads(line)
+                    idx[t["item_id"]] = {"n_tool_calls": t.get("n_tool_calls", 0), "tools_used": t.get("tools_used") or [],
+                                         "tool_s": t.get("tool_s", 0.0), "offset": off, "length": len(line),
+                                         "n_tool_results": sum(1 for s in t.get("trace") or [] if s.get("role") == "tool")}
+                off += len(line)
+        return idx
+    return _cached(Path(path), "index", build)
+
+
+def read_traces(path: Path, entries: list[dict]) -> list[list | None]:
+    """The `trace` of each index entry, read by offset."""
+    out = []
+    with open(path, "rb") as f:
+        for e in entries:
+            f.seek(e["offset"])
+            out.append(json.loads(f.read(e["length"])).get("trace"))
+    return out
+
+
+def _all_traces(path: Path):
+    """(item_id, trace) for every item's last trace, in file order."""
+    idx = trace_index(path)
+    items = sorted(idx.items(), key=lambda kv: kv[1]["offset"])
+    for (i, _), t in zip(items, read_traces(path, [e for _, e in items])):
+        yield i, t
+
+
+def trace_sources(path: Path) -> dict[str, tuple[list, list]]:
+    """item_id -> source_use(trace) for a whole run (slow once, then cached)."""
+    return _cached(Path(path), "sources", lambda: {i: source_use(t) for i, t in _all_traces(path)})
+
+
+def trace_kb(path: Path, answers: dict[str, str]) -> list[dict]:
+    """kb_sections rows (with item_id) for a whole run; `answers`: item_id -> ground truth (fixed per item)."""
+    return _cached(Path(path), "kb", lambda: [dict(r, item_id=i) for i, t in _all_traces(path)
+                                              for r in kb_sections(t, str(answers.get(i, "")))])
+
+
+def kb_summary(k, calls: int) -> dict:
+    """Knowledge-base relevance and use over one run's kb_sections rows `k` (a DataFrame); `calls`: tool results."""
     out = {"tool results": calls, "with knowledge-base text": int(k.item_id.nunique()) if len(k) else 0,
            "sections shown": len(k)}
     if len(k):
@@ -157,7 +231,7 @@ def kb_summary(p) -> dict:
             out[f"{col} (%)"] = round(k[col].mean() * 100, 1)
         cc = k[k["correct class"]]
         out["used, correct class (%)"] = round(cc.used.mean() * 100, 1) if len(cc) else None
-    return out, k
+    return out
 
 
 def main() -> None:
@@ -196,14 +270,17 @@ def app() -> None:
     def runs() -> list[dict]:
         return load_runs(args.runs)
 
-    def frame(run_dir: str) -> pd.DataFrame:
-        """Predictions joined with the last trace per item (a resumed run may have retried an item). Cached until the
-        run's files change: a full run takes minutes to load."""
-        stamp = tuple(f.stat().st_mtime for f in (Path(run_dir) / "predictions.jsonl", Path(run_dir) / "traces.jsonl")
-                      if f.exists())
-        return _frame(run_dir, stamp)
+    def _stamp(run_dir: str) -> tuple:
+        return tuple(f.stat().st_mtime for f in (Path(run_dir) / "predictions.jsonl", Path(run_dir) / "traces.jsonl")
+                     if f.exists())
 
-    @st.cache_data(show_spinner="Loading run (a full run takes a few minutes the first time)...", max_entries=8)
+    def frame(run_dir: str) -> pd.DataFrame:
+        """Predictions joined with each item's trace summary from the trace index (no trace text: see trace_index).
+        Cached until the run's files change."""
+        return _frame(run_dir, _stamp(run_dir))
+
+    @st.cache_data(show_spinner="Loading run (indexing traces the first time: about a minute for a full run)...",
+                   max_entries=8)
     def _frame(run_dir: str, stamp: tuple) -> pd.DataFrame:  # stamp: part of the cache key
         p = pd.DataFrame(read_jsonl(Path(run_dir) / "predictions.jsonl"))
         if not len(p):
@@ -211,15 +288,42 @@ def app() -> None:
         p["cv"] = [cv_key(r) for r in p.to_dict("records")]
         p["score"] = [r["judge_correct"] if r.get("judge_correct") is not None and r["judge_correct"] == r["judge_correct"]
                       else float(r["correct"]) for r in p.to_dict("records")]
-        tr = {t["item_id"]: t for t in read_jsonl(Path(run_dir) / "traces.jsonl")}
-        if tr:
-            p["n_tool_calls"] = [tr.get(i, {}).get("n_tool_calls", 0) for i in p.item_id]
-            p["tools_used"] = [tr.get(i, {}).get("tools_used", []) for i in p.item_id]
-            p["tool_s"] = [tr.get(i, {}).get("tool_s", 0.0) for i in p.item_id]
-            p["trace"] = [tr.get(i, {}).get("trace") for i in p.item_id]
-            use = [source_use(t) for t in p.trace]
-            p["sources_shown"], p["sources_used"] = [u[0] for u in use], [u[1] for u in use]
+        tf = Path(run_dir) / "traces.jsonl"
+        if tf.exists():
+            idx = trace_index(tf)
+            for col, default in (("n_tool_calls", 0), ("tools_used", []), ("tool_s", 0.0), ("n_tool_results", 0)):
+                p[col] = [idx.get(i, {}).get(col, default) for i in p.item_id]
         return p
+
+    def with_sources(run_dir: str) -> pd.DataFrame:
+        """frame() plus sources_shown / sources_used for every item (computed for the whole run once, then cached)."""
+        return _with_sources(run_dir, _stamp(run_dir))
+
+    @st.cache_data(show_spinner="Checking source use on every trace (slow the first time per run, then cached)...",
+                   max_entries=8)
+    def _with_sources(run_dir: str, stamp: tuple) -> pd.DataFrame:
+        p = frame(run_dir).copy()
+        su = trace_sources(Path(run_dir) / "traces.jsonl")
+        p["sources_shown"] = [su.get(i, ([], []))[0] for i in p.item_id]
+        p["sources_used"] = [su.get(i, ([], []))[1] for i in p.item_id]
+        return p
+
+    def kb_frame(run_dir: str) -> pd.DataFrame:
+        """kb_sections rows for the whole run, with the item's score and ag task."""
+        return _kb_frame(run_dir, _stamp(run_dir))
+
+    @st.cache_data(show_spinner="Checking knowledge-base sections on every trace (slow the first time per run)...",
+                   max_entries=8)
+    def _kb_frame(run_dir: str, stamp: tuple) -> pd.DataFrame:
+        p = frame(run_dir).set_index("item_id")
+        k = pd.DataFrame(trace_kb(Path(run_dir) / "traces.jsonl", p["gt"].astype(str).to_dict()))
+        if len(k):
+            k["score"] = k.item_id.map(p["score"])
+            k["ag_task"] = k.item_id.map(p["ag_task"]) if "ag_task" in p else ""
+        return k
+
+    def has_traces(run_dir: str) -> bool:
+        return "n_tool_calls" in frame(run_dir)
 
     def image_path(path: str) -> str | None:
         if Path(path).exists():
@@ -289,9 +393,7 @@ def app() -> None:
                    "sources overlap. Compare with the noise line: items where no tool was called, which flip only from "
                    "sampling.")
         for r in harness:
-            p = frame(r["dir"])
-            if "sources_shown" not in p:
-                continue
+            p = with_sources(r["dir"])
             st.subheader(r["name"])
             j = p.set_index("item_id")
             if len(bs.columns):
@@ -334,19 +436,19 @@ def app() -> None:
                    "Appearance section: the heading is about symptoms, damage, identification or description. Correct "
                    "class: the candidate is the item's answer. Used: the model's later reasoning or answer repeats two "
                    "4-word phrases from the section that it had not written before the result.")
-        runs_kb = [r for r in harness if frame(r["dir"]).trace.map(lambda t: "[local_kb" in json.dumps(t)).any()]
+        runs_kb = [r for r in harness if len(kb_frame(r["dir"]))]
         if not runs_kb:
             st.info("No run here showed knowledge-base text (run with --kb).")
             return
         summ = []
         for r in runs_kb:
-            o, _ = kb_summary(frame(r["dir"]))
+            o = kb_summary(kb_frame(r["dir"]), int(frame(r["dir"]).n_tool_results.sum()))
             summ.append({"run": f"{r['name']} · {Path(r['dir']).name}", **o})
         st.dataframe(pd.DataFrame(summ), hide_index=True, width="stretch")
         st.markdown(f"**By {split} and site** (sections shown; share that name the candidate and that were used)")
         rows = []
         for r in runs_kb:
-            _, k = kb_summary(frame(r["dir"]))
+            k = kb_frame(r["dir"])
             col = "ag_task" if by == "ag_task" else None
             if col is None:
                 cv = frame(r["dir"]).set_index("item_id")["cv"]
@@ -363,9 +465,7 @@ def app() -> None:
                     "and the share where it was then used)")
         rows = []
         for r in harness:
-            p = frame(r["dir"])
-            if "sources_shown" not in p:
-                continue
+            p = with_sources(r["dir"])
             for grp, g in p.groupby(by):
                 for src in sorted({x for xs in g.sources_shown for x in xs}):
                     shown = g.sources_shown.map(lambda xs: src in xs)
@@ -375,7 +475,7 @@ def app() -> None:
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
         names = {f"{r['name']} · {Path(r['dir']).name}": r["dir"] for r in runs_kb}
         c1, c0, c2, c3, c4 = st.columns([3, 1, 1, 1, 1])
-        _, k = kb_summary(frame(names[c1.selectbox("Run", list(names))]))
+        k = kb_frame(names[c1.selectbox("Run", list(names))])
         if (task := c0.selectbox("ag task", ["all", *sorted(k.ag_task.dropna().unique())] if len(k) else ["all"])) != "all":
             k = k[k.ag_task == task]
         filt = {c: col.selectbox(c, ["all", "yes", "no"], key=c)
@@ -437,21 +537,33 @@ def app() -> None:
             v = v[(v.n_tool_calls > 0) == (tools == "used")]
         bs = base_scores()
         if len(bs.columns):
-            base = c6.selectbox("vs baseline", ["all", "fixed", "broken"], help=f"Against {bs.columns[0]}")
+            base = c6.selectbox("vs baseline", ["all", "fixed", "broken"], help=f"Against {bs.columns[0]}", key="vs_base")
             if base != "all":
                 b = v.item_id.map(bs.iloc[:, 0])
                 v = v[(b < 0.5) & (v.score >= 0.5)] if base == "fixed" else v[(b >= 0.5) & (v.score < 0.5)]
-        if "sources_shown" in v:
-            src = c7.selectbox("Source", ["all"] + sorted({x for xs in p.sources_shown for x in xs}),
-                               help="Items where this source was in a tool result")
-            if src != "all":
-                v = v[v.sources_shown.map(lambda xs: src in xs)]
+        src = c7.selectbox("Source", ["all"] + sorted(_source_names() - set(OLD_LABELS)),
+                           help="Items where this source was in a tool result (checks every trace of the run the first "
+                                "time, then cached)")
+        if src != "all":
+            shown = with_sources(run_dir).set_index("item_id").sources_shown
+            v = v[v.item_id.map(lambda i: src in shown.get(i, []))]
         items = {it["item_id"]: it for it in read_jsonl(Path(run_dir) / "items.jsonl")}
         base_recs = {r["name"]: frame(r["dir"]).set_index("item_id") for r in baselines if len(frame(r["dir"]))}
-        st.caption(f"{len(v)} items")
-        page_size = 10
-        page = st.number_input("Page", 1, max(1, (len(v) + page_size - 1) // page_size), 1)
-        for _, r in v.iloc[(page - 1) * page_size: page * page_size].iterrows():
+        # Show 10 items, 10 more per "Load more"; the count resets when a filter changes. Only the shown items'
+        # traces are read from disk.
+        key = ("shown", run_dir, dataset, fmt, which, tools, st.session_state.get("vs_base"), src)
+        if st.session_state.get("shown_key") != key:
+            st.session_state.shown_key, st.session_state.n_shown = key, PAGE
+        n_shown = min(st.session_state.n_shown, len(v))
+        st.caption(f"{len(v)} items · showing {n_shown}")
+        idx = trace_index(Path(run_dir) / "traces.jsonl")
+        shown_rows = v.iloc[:n_shown]
+        traces = dict(zip(shown_rows.item_id, read_traces(Path(run_dir) / "traces.jsonl",
+                                                          [idx[i] for i in shown_rows.item_id if i in idx])))
+        for _, r in shown_rows.iterrows():
+            r = dict(r)
+            r["trace"] = traces.get(r["item_id"])
+            r["sources_shown"], r["sources_used"] = source_use(r["trace"]) if isinstance(r["trace"], list) else ([], [])
             it = items.get(r["item_id"], {})
             with st.container(border=True):
                 a, b = st.columns([1, 2])
@@ -481,9 +593,12 @@ def app() -> None:
                     if isinstance(r.get("trace"), list):
                         with st.expander(f"Trace ({int(r['n_tool_calls'])} tool calls)", expanded=r["n_tool_calls"] > 0):
                             show_trace(r["trace"])
+        if n_shown < len(v) and st.button(f"Load {min(PAGE, len(v) - n_shown)} more"):
+            st.session_state.n_shown += PAGE
+            st.rerun()
 
-    st.navigation([st.Page(page_usage, title="Tool use", default=True), st.Page(page_sources, title="Sources"),
-                   st.Page(page_kb, title="Knowledge base"), st.Page(page_traces, title="Traces")]).run()
+    st.navigation([st.Page(page_traces, title="Traces", default=True), st.Page(page_usage, title="Tool use"),
+                   st.Page(page_sources, title="Sources"), st.Page(page_kb, title="Knowledge base")]).run()
 
 
 if __name__ == "__main__":
