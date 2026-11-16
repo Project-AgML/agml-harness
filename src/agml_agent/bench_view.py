@@ -152,6 +152,8 @@ def kb_sections(trace: list | None, answer: str = "") -> list[dict]:
 CACHE_DIR = Path(os.environ.get("AGML_VIEW_CACHE", Path.home() / ".cache" / "agml-agent-view"))
 CACHE_VERSION = 1
 PAGE = 10  # Traces page: items shown at first and per "Load more"
+TOOL_NAMES = {"retrieve", "run_python"}  # the tools a benchmark run can offer
+INVALID_CALL = "invalid tool name"
 
 
 def _cached(path: Path, kind: str, build):
@@ -533,12 +535,17 @@ def app() -> None:
         if which != "all":
             v = v[(v.score >= 0.5) == (which == "correct")]
         # Tools: any / none, or by tool: "<tool>" = called it (maybe with others), "<tool> only", "all of ...".
-        names_used = sorted({t for ts in p.tools_used for t in ts})
+        # A call whose name is not a real tool (the model once put its whole answer in the name field; the harness
+        # answered "error: unknown tool") counts as INVALID_CALL, not as a tool of its own.
+        tool_set = lambda ts: {t if t in TOOL_NAMES else INVALID_CALL for t in ts}
+        seen = set().union(*p.tools_used.map(tool_set)) if len(p) else set()
+        names_used = sorted(seen & TOOL_NAMES)
         opts = ["all", "any tool", "no tool", *names_used, *([f"{t} only" for t in names_used] if len(names_used) > 1 else []),
-                *([" + ".join(names_used)] if len(names_used) > 1 else [])]
+                *([" + ".join(names_used)] if len(names_used) > 1 else []), *([INVALID_CALL] if INVALID_CALL in seen else [])]
         tools = c5.selectbox("Tools", opts, help="Which tools the model called on the item. '<tool>': called it, possibly "
-                             "with others; '<tool> only': no other tool; 'a + b': called all of them.")
-        used = v.tools_used.map(set)
+                             f"with others; '<tool> only': no other tool; 'a + b': called all of them; '{INVALID_CALL}': "
+                             "a call naming no real tool (answered with an error).")
+        used = v.tools_used.map(tool_set)
         if tools == "any tool":
             v = v[v.n_tool_calls > 0]
         elif tools == "no tool":
@@ -606,7 +613,7 @@ def app() -> None:
                             st.caption(f"{n}: {'✅' if x['score'] >= 0.5 else '❌'} {str(x['answer'])[:300]}")
                     if isinstance(r.get("trace"), list):
                         with st.expander(f"Trace ({int(r['n_tool_calls'])} tool calls: "
-                                         f"{', '.join(sorted(set(r['tools_used']))) or 'none'})"):
+                                         f"{', '.join(sorted({t if t in TOOL_NAMES else INVALID_CALL for t in r['tools_used']})) or 'none'})"):
                             show_trace(r["trace"])
         if n_shown < len(v) and st.button(f"Load {min(PAGE, len(v) - n_shown)} more"):
             st.session_state.n_shown += PAGE
