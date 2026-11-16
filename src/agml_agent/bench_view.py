@@ -532,9 +532,23 @@ def app() -> None:
         which = c4.selectbox("Show", ["all", "wrong", "correct"])
         if which != "all":
             v = v[(v.score >= 0.5) == (which == "correct")]
-        tools = c5.selectbox("Tools", ["all", "used", "not used"])
-        if tools != "all":
-            v = v[(v.n_tool_calls > 0) == (tools == "used")]
+        # Tools: any / none, or by tool: "<tool>" = called it (maybe with others), "<tool> only", "all of ...".
+        names_used = sorted({t for ts in p.tools_used for t in ts})
+        opts = ["all", "any tool", "no tool", *names_used, *([f"{t} only" for t in names_used] if len(names_used) > 1 else []),
+                *([" + ".join(names_used)] if len(names_used) > 1 else [])]
+        tools = c5.selectbox("Tools", opts, help="Which tools the model called on the item. '<tool>': called it, possibly "
+                             "with others; '<tool> only': no other tool; 'a + b': called all of them.")
+        used = v.tools_used.map(set)
+        if tools == "any tool":
+            v = v[v.n_tool_calls > 0]
+        elif tools == "no tool":
+            v = v[v.n_tool_calls == 0]
+        elif tools.endswith(" only"):
+            v = v[used.map(lambda s: s == {tools[:-5]})]
+        elif " + " in tools:
+            v = v[used.map(lambda s: set(names_used) <= s)]
+        elif tools != "all":
+            v = v[used.map(lambda s: tools in s)]
         bs = base_scores()
         if len(bs.columns):
             base = c6.selectbox("vs baseline", ["all", "fixed", "broken"], help=f"Against {bs.columns[0]}", key="vs_base")
@@ -591,7 +605,8 @@ def app() -> None:
                             x = br.loc[r["item_id"]]
                             st.caption(f"{n}: {'✅' if x['score'] >= 0.5 else '❌'} {str(x['answer'])[:300]}")
                     if isinstance(r.get("trace"), list):
-                        with st.expander(f"Trace ({int(r['n_tool_calls'])} tool calls)", expanded=r["n_tool_calls"] > 0):
+                        with st.expander(f"Trace ({int(r['n_tool_calls'])} tool calls: "
+                                         f"{', '.join(sorted(set(r['tools_used']))) or 'none'})"):
                             show_trace(r["trace"])
         if n_shown < len(v) and st.button(f"Load {min(PAGE, len(v) - n_shown)} more"):
             st.session_state.n_shown += PAGE
